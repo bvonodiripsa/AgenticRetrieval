@@ -1,0 +1,153 @@
+# =============================================================================
+# RAG Configuration (Example)
+# =============================================================================
+
+# Retrieval parameters
+retrieval:
+  k_fulltext: 10
+  k_structured: 25
+  k_unstructured: 65
+  k_diverse: 80       # 0 = disabled; >0 = select this many diverse chunks via log-det
+  eta: 0.0            # Gram matrix regularization
+  rescale_power: 5.0  # Query-similarity rescale power
+
+# Pipeline parameters
+pipeline:
+  max_sub_questions: 5
+  rounds: 2
+
+# Execution parameters
+execution:
+  max_questions: null  # null = process all questions
+  max_workers: 1
+
+# Paths (relative to working directory)
+paths:
+  questions_path: ""
+  output_root: ""
+
+# Azure OpenAI / LLM settings
+llm:
+  llm_endpoint: ""
+  embed_endpoint: ""
+  api_version: "2025-04-01-preview"
+  llm_model: "gpt-5.2"
+  embed_model: ""
+  embed_dimensions: 1024
+  temperature: 0.0
+  max_completion_tokens: 2048
+  max_retries: 2
+  use_rbac_auth: false
+  token_scope: ""
+
+  # Shared API key (used when llm_endpoint/embed_endpoint target Azure OpenAI)
+  azure_openai_key: ""
+
+# Cosmos DB settings
+cosmos:
+  uri: ""
+  key: ""
+  database_name: "divdet"
+  structured_container: "structured"
+  structured_partition_key_path: "/taxonomy"
+  unstructured_container: "unstructured"
+  unstructured_partition_key_path: "/url"
+
+  # Upload settings used by cosmos_db_upload.py
+  cosmos_account_name: ""
+  cosmos_resource_group: ""
+  azure_subscription_id: ""
+  structured_documents_root: ""
+  unstructured_documents_root: ""
+  embedding_batch_size: 20
+
+  # Container policies used by cosmos_db_upload.py (kept as raw JSON for direct copy/paste)
+  indexing_policies_json:
+    structured: |
+      {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          { "path": "/*" }
+        ],
+        "excludedPaths": [
+          { "path": "/\"_etag\"/?" },
+          { "path": "/e/*" }
+        ],
+        "fullTextIndexes": [
+          { "path": "/description" },
+          { "path": "/long_description" },
+          { "path": "/benefits" },
+          { "path": "/taxonomy" },
+          { "path": "/taxonomy_sap" },
+          { "path": "/designation" }
+        ],
+        "vectorIndexes": [
+          {
+            "path": "/e",
+            "type": "diskANN",
+            "quantizationByteSize": 192,
+            "indexingSearchListSize": 100
+          }
+        ]
+      }
+    unstructured: |
+      {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          { "path": "/*" }
+        ],
+        "excludedPaths": [
+          { "path": "/\"_etag\"/?" },
+          { "path": "/e/*" }
+        ],
+        "fullTextIndexes": [
+          { "path": "/title" },
+          { "path": "/summary" },
+          { "path": "/content" }
+        ],
+        "vectorIndexes": [
+          {
+            "path": "/e",
+            "type": "diskANN",
+            "quantizationByteSize": 192,
+            "indexingSearchListSize": 100
+          }
+        ]
+      }
+
+  vector_embedding_policy_json: |
+    {
+      "vectorEmbeddings": [
+        {
+          "path": "/e",
+          "dataType": "float32",
+          "dimensions": 1024,
+          "distanceFunction": "cosine"
+        }
+      ]
+    }
+
+  full_text_policies_json:
+    structured: |
+      {
+        "defaultLanguage": "en-US",
+        "fullTextPaths": [
+          { "path": "/description", "language": "en-US" },
+          { "path": "/long_description", "language": "en-US" },
+          { "path": "/benefits", "language": "en-US" },
+          { "path": "/taxonomy", "language": "en-US" },
+          { "path": "/taxonomy_sap", "language": "en-US" },
+          { "path": "/designation", "language": "en-US" }
+        ]
+      }
+    unstructured: |
+      {
+        "defaultLanguage": "en-US",
+        "fullTextPaths": [
+          { "path": "/title", "language": "en-US" },
+          { "path": "/summary", "language": "en-US" },
+          { "path": "/content", "language": "en-US" }
+        ]
+      }

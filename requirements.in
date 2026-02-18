@@ -1,0 +1,9 @@
+azure-cosmos
+azure-identity
+azure-mgmt-cosmosdb
+numpy
+openai
+python-dotenv
+PyYAML
+requests
+tqdm

@@ -1,0 +1,147 @@
+[
+  {
+    "question_id": "skf_0000",
+    "question_text": "what is the max temperature that 6000-2RSH/GFJ can tolerate?",
+    "answer": "100 \u00b0C. Temperatures up to 120 \u00b0C (250 \u00b0F) can only be tolerated for brief periods."
+  },
+  {
+    "question_id": "skf_0001",
+    "question_text": "what is the minimum temperature that 6000-2RSH/GFJ can tolerate?",
+    "answer": "Damage can result when the bearings are operated continuously below 10 \u00b0C. At the temperature of -40 \u00b0C, the torque required to start or run this bearing may be significantly higher. Below -40 \u00b0C is also not allowed for the seals used in this bearing."
+  },
+  {
+    "question_id": "skf_0002",
+    "question_text": "what is the max temperature that 6206-2RS2/C3GJN can tolerate?",
+    "answer": "120 \u00b0C."
+  },
+  {
+    "question_id": "skf_0003",
+    "question_text": "what is the minimum temperature that 6206-2RS2/C3GJN can tolerate?",
+    "answer": "Damage can result when the bearings are operated continuously below 35 \u00b0C. At the temperature of -30 \u00b0C, the torque required to start or run this bearing may be significantly higher. Below -30 \u00b0C is also not allowed for the seals used in this bearing."
+  },
+  {
+    "question_id": "skf_0004",
+    "question_text": "what is the max temperature that 6206-2RS2/C3S1GWP can tolerate?",
+    "answer": "Temperatures above the 145 \u00b0C can be tolerated for short periods but may have an impact on the grease life. At 167 \u00b0C the grease used in this bearing will lose its structure and becomes a fluid."
+  },
+  {
+    "question_id": "skf_0005",
+    "question_text": "what is the minimum temperature that 6206-2RS2/C3S1GWP can tolerate?",
+    "answer": "Damage can result when the bearings are operated continuously below -22 \u00b0C. Below -30 \u00b0C is not allowed for the seals used in this bearing."
+  },
+  {
+    "question_id": "skf_0006",
+    "question_text": "what is the max temperature that 30240 can tolerate?",
+    "answer": "150 \u00b0C."
+  },
+  {
+    "question_id": "skf_0007",
+    "question_text": "what is the minimum temperature that 30240 can tolerate?",
+    "answer": "This is not mentioned in www.skf.com"
+  },
+  {
+    "question_id": "skf_0008",
+    "question_text": "what is the max temperature that 30210 can tolerate?",
+    "answer": "120 \u00b0C."
+  },
+  {
+    "question_id": "skf_0009",
+    "question_text": "what is the minimum temperature that 30210 can tolerate?",
+    "answer": "This is not mentioned in www.skf.com"
+  },
+  {
+    "question_id": "skf_0010",
+    "question_text": "what is the max temperature that QJ 206 MA can tolerate?",
+    "answer": "150 \u00b0C."
+  },
+  {
+    "question_id": "skf_0011",
+    "question_text": "I have a 6000-2RSH/GFJ which is said to tolerate temperature up to 100 degree C. I want to change the lubricant to tolerate higher temperature, saying around 140 degree C. Which lubricant should I use?",
+    "answer": "Changing lubricant would not allow this bearing to tolerate higher temperature because the limiting factor in this case is the seals used."
+  },
+  {
+    "question_id": "skf_0012",
+    "question_text": "What are the temperature limits for Viton rubber seals? (Viton is a trademark, often used as a product name)",
+    "answer": "The FKM rubber seals have a temperature limit up to 200\u00b0C"
+  },
+  {
+    "question_id": "skf_0013",
+    "question_text": "What is the maximum temperature for sensor bearings?",
+    "answer": "It is 125\u00b0C during 500 hrs"
+  },
+  {
+    "question_id": "skf_0014",
+    "question_text": "Can TLSD 250 be used in -20°C?",
+    "answer": "Lowest temperature is 0\u00b0C"
+  },
+  {
+    "question_id": "skf_0015",
+    "question_text": "Can TLSD 250/HB2 be used in -20°C?",
+    "answer": "??"
+  },
+  {
+    "question_id": "skf_0016",
+    "question_text": "What is the SKF interchange for 22210 CC?",
+    "answer": "22210 E"
+  },
+  {
+    "question_id": "skf_0017",
+    "question_text": "What is the SKF interchange for TSNA 220 G?",
+    "answer": "TSN 220 L replaced by TXL 220"
+  },
+  {
+    "question_id": "skf_0018",
+    "question_text": "What is the SKF interchange for TSNA 232 G?",
+    "answer": "??"
+  },
+  {
+    "question_id": "skf_0019",
+    "question_text": "What is the SKF interchange for TSNA 232 A?",
+    "answer": "??"
+  },
+  {
+    "question_id": "skf_0020",
+    "question_text": "What is the SKF interchange for TSN 220 L?",
+    "answer": "??"
+  },
+  {
+    "question_id": "skf_0021",
+    "question_text": "What is the default set temperature for the TMBH 5?",
+    "answer": "110\u00b0C"
+  },
+  {
+    "question_id": "skf_0022",
+    "question_text": "What is the default set temperature for the TMBH 5/120V?",
+    "answer": "??"
+  },
+  {
+    "question_id": "skf_0023",
+    "question_text": "What is the maximum temperature when mounting a 6310-2RS1?",
+    "answer": "Max. 80\u00b0C"
+  },
+  {
+    "question_id": "skf_0024",
+    "question_text": "What is the viscosity of the dismounting oil?",
+    "answer": "This oil LHDF 900 has a viscosity of 900 mm2/s at 20\u00b0C"
+  },
+  {
+    "question_id": "skf_0025",
+    "question_text": "what will happen with my spherical plain bearing when operating in 180°C?",
+    "answer": "The load carrying capacity is reduced when temperature is above 120\u00b0C"
+  },
+  {
+    "question_id": "skf_0026",
+    "question_text": "How long time can I store my open bearings?",
+    "answer": "10 years if the humidity is below 65% and temperature is btw 20-25\u00b0C"
+  },
+  {
+    "question_id": "skf_0027",
+    "question_text": "What is the most common grease to use for my spherical plain bearings?",
+    "answer": "If steel/steel combination the most common grease is LGHB 2, LGEP 2 or LGMT 3"
+  },
+  {
+    "question_id": "skf_0028",
+    "question_text": "What is the most common grease to use for my YAR 205-2F bearings?",
+    "answer": "LGWA 2 or LGMT 2"
+  }
+]
