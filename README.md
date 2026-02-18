@@ -130,3 +130,40 @@ Outputs are written to:
 - `config.yaml.example` — full config template
 - `data/` — sample input corpus
 - `out/` — generated outputs
+
+## Troubleshooting
+
+- **`python rag_divdet.py --max-questions 1` fails intermittently**
+  - Re-run once to confirm if it is transient API flakiness.
+  - Reduce retries for faster failure diagnosis: set `llm.max_retries: 1`.
+  - Verify `llm.llm_endpoint`, `llm.llm_model`, `llm.api_version`, and auth (`llm.azure_openai_key` or RBAC settings).
+
+- **Azure OpenAI auth errors (401/403)**
+  - If using key auth, ensure `llm.azure_openai_key` is valid and maps to the configured endpoint.
+  - If using RBAC (`llm.use_rbac_auth: true`), make sure your signed-in identity has Azure OpenAI access and `llm.token_scope` is correct.
+
+- **Cosmos upload skipped for one branch**
+  - Check that the corresponding root path is populated:
+    - `cosmos.structured_documents_root`
+    - `cosmos.unstructured_documents_root`
+  - An empty root means that branch is intentionally skipped.
+
+- **Missing container during upload**
+  - Auto-create works only when management settings are present:
+    - `cosmos.azure_subscription_id`
+    - `cosmos.cosmos_resource_group`
+    - optional `cosmos.cosmos_account_name`
+  - Without these, create containers manually or populate the settings above.
+
+- **Cosmos conflicts due to duplicate source IDs**
+  - The uploader replaces IDs with a deterministic hash of each document relative path to avoid cross-file collisions.
+  - If old data exists from a previous ID strategy, consider clearing/reloading or migrating for consistency.
+
+- **No questions processed / empty output**
+  - Confirm `paths.questions_path` points to a directory containing `.json` question files.
+  - Confirm `paths.output_root` is writable.
+
+- **Dependency or import errors**
+  - Recreate/refresh environment and reinstall dependencies:
+    - `./run.ps1` (PowerShell) or `source ./run.sh` (Bash)
+    - or `pip install -r requirements.txt`
