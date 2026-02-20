@@ -131,6 +131,50 @@ Outputs are written to:
 - `--questions-path`
 - `--output-root`
 
+### `--timing` — wall-clock profiling
+
+Add `--timing` to print a checkpoint line for every major operation as it completes:
+
+```bash
+python rag_divdet.py --max-questions 1 --timing
+```
+
+Each line has the form:
+
+```
+  [TIMING] <label>: +<step_elapsed>s  (total <since_start>s)
+```
+
+`+<step_elapsed>` is the time for that individual step; `total` is the cumulative wall-clock time from program start.
+
+| Checkpoint label | What is measured |
+|---|---|
+| `retriever.initialize` | Cosmos DB client construction and credential handshake |
+| `retrieve – start / TOTAL` | End-to-end retrieval for one query (all sub-steps below) |
+| `  retrieve: fulltext – start/done` | Cosmos FullTextScore / RRF query |
+| `  retrieve: embed query – start/done` | Azure OpenAI embedding call for the query |
+| `  retrieve: structured vector – start/done` | Vector search on the structured container |
+| `  retrieve: unstructured vector – start/done` | Vector search on the unstructured container |
+| `  retrieve: diversity embed missing – done` | Embedding of any chunks that lacked a stored embedding (needed for log-det) |
+| `  retrieve: greedy log-det – start/done` | Diversity selection via greedy log-determinant maximisation |
+| `fulltext query (top N) – start/done` | Inner Cosmos query time for full-text search |
+| `vector query (top N, <container>) – start/done` | Inner Cosmos vector-index query time |
+| `read_item xN (<container>) – done` | Batch of individual Cosmos point-reads after the vector query (one per result) |
+| `embed – start/done` | Every Azure OpenAI embedding API call |
+| `LLM preliminary – start/done` | First LLM call generating the preliminary answer from initial chunks |
+| `LLM gap-decompose – start/done` | LLM call that returns sub-questions to fill identified gaps |
+| `pipeline: round N sub-Q parallel (N) – start/done` | All sub-question retrieve + answer calls (run in parallel threads) |
+| `LLM sub-Q answer – start/done` | Each individual sub-question LLM answer (from worker threads) |
+| `LLM regenerate rnd N – start/done` | LLM regeneration that integrates sub-answers between rounds |
+| `LLM synthesis – start/done` | Final LLM synthesis combining all sub-answers into the answer |
+| `pipeline.run – TOTAL` | End-to-end pipeline time for a single question |
+
+Typical bottlenecks to look for:
+
+- **`read_item xN`** — N individual Cosmos point-reads after each vector query; latency multiplies with `--k-structured` / `--k-unstructured`.
+- **`LLM * – start/done`** — each LLM call contributes several seconds; count = `1 (preliminary) + rounds × (1 gap-decompose + N sub-Q + 1 regen) + 1 synthesis`.
+- **`embed – start/done`** — one call per `retrieve()` invocation; total = `1 + rounds × num_sub_questions + 1` (all per question).
+
 ## Repository layout
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert

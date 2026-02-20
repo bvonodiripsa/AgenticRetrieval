@@ -26,6 +26,26 @@ import numpy as np
 
 load_dotenv()
 
+# =============================================================================
+# TIMING INSTRUMENTATION (enabled via --timing flag)
+# =============================================================================
+
+_TIMING: bool = False
+_t0: float = 0.0
+_print_lock = threading.Lock()
+
+
+def _ck(label: str, ref: float | None = None) -> float:
+    """Print a timing checkpoint; returns current perf_counter value."""
+    now = time.perf_counter()
+    if _TIMING:
+        elapsed = now - (ref if ref is not None else _t0)
+        total = now - _t0
+        with _print_lock:
+            print(f"  [TIMING] {label}: +{elapsed:.3f}s  (total {total:.3f}s)")
+    return now
+
+
 # Load config from yaml
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 with open(_CONFIG_PATH) as _f:
@@ -267,17 +287,19 @@ class LLMClient:
             self._embed_client = AzureOpenAI(**client_kwargs)
         return self._embed_client
     
-    def complete(self, prompt: str, retries: int = None) -> str:
+    def complete(self, prompt: str, retries: int = None, label: str = "LLM complete") -> str:
         if retries is None:
             retries = self._cfg["max_retries"]
         for attempt in range(retries):
             try:
+                t = _ck(f"{label} – start")
                 result = self.llm_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
                     model=self._cfg["llm_model"],
                     temperature=self._cfg["temperature"],
                     max_completion_tokens=self._cfg["max_completion_tokens"],
                 )
+                _ck(f"{label} – done", t)
                 return result.choices[0].message.content
             except openai.RateLimitError:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
@@ -323,7 +345,9 @@ class LLMClient:
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"Invalid JSON response from embedding endpoint {embed_endpoint}: {e}") from e
 
+        t = _ck("embed – start")
         result = self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
+        _ck("embed – done", t)
         return self._normalize_embedding(result.data[0].embedding)
 
 # =============================================================================
@@ -433,11 +457,14 @@ class CombinedRetriever:
             order = f"ORDER BY RANK RRF({', '.join(scores)})"
         
         try:
-            return list(self._structured.query_items(
+            t = _ck(f"fulltext query (top {top_k}) – start")
+            items = list(self._structured.query_items(
                 query=f"SELECT TOP {top_k} * FROM c {order}",
                 parameters=[],
                 enable_cross_partition_query=True
             ))
+            _ck(f"fulltext query – done ({len(items)} results)", t)
+            return items
         except Exception as e:
             print(f"Fulltext error: {e}")
             return []
@@ -452,12 +479,15 @@ class CombinedRetriever:
             elif len(adjusted_emb) < self._expected_vector_dim:
                 adjusted_emb = adjusted_emb + [0.0] * (self._expected_vector_dim - len(adjusted_emb))
         pk_expr = self._partition_key_expr(partition_key_path)
+        t = _ck(f"vector query (top {top_k}, {container.id}) – start")
         results = list(container.query_items(
             query=f"SELECT TOP @k c.id, {pk_expr} AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)",
             parameters=[{"name": "@k", "value": top_k}, {"name": "@emb", "value": adjusted_emb}],
             enable_cross_partition_query=True
         ))
+        _ck(f"vector query – done ({len(results)} results)", t)
         docs = []
+        t_reads = time.perf_counter()
         for r in results:
             partition_key_value = r.get("pkv")
             if partition_key_value is None:
@@ -465,6 +495,7 @@ class CombinedRetriever:
             doc = container.read_item(item=r["id"], partition_key=partition_key_value)
             doc["_score"] = r.get("score")
             docs.append(doc)
+        _ck(f"read_item x{len(docs)} ({container.id}) – done", t_reads)
         return docs
     
     def _format_doc(self, doc: dict, source: str) -> RetrievedChunk:
@@ -482,35 +513,50 @@ class CombinedRetriever:
         )
     
     def retrieve(self, query: str) -> list[RetrievedChunk]:
+        t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
         chunks, seen = [], set()
         
         # Fulltext
+        t = _ck("  retrieve: fulltext – start")
         for doc in self._fulltext_search(query, self.k_fulltext):
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'fulltext'))
+        _ck(f"  retrieve: fulltext – done ({sum(1 for c in chunks if c.metadata.get('_data_source')=='fulltext')} chunks)", t)
         
         # Vector searches
+        t = _ck("  retrieve: embed query – start")
         emb = self._llm.embed(query)
+        _ck("  retrieve: embed query – done", t)
+        t = _ck("  retrieve: structured vector – start")
         for doc in self._vector_search(self._structured, self._structured_partition_key_path, emb, self.k_structured):
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'structured_vector'))
+        _ck(f"  retrieve: structured vector – done", t)
+        t = _ck("  retrieve: unstructured vector – start")
         for doc in self._vector_search(self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured):
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'unstructured_vector'))
+        _ck(f"  retrieve: unstructured vector – done", t)
         
         # Diversity selection via greedy log-det maximization
         if self.k_diverse > 0 and len(chunks) > self.k_diverse:
+            t = _ck("  retrieve: diversity embed missing – start")
+            n_missing = sum(1 for c in chunks if c.metadata.get('embedding') is None)
             for c in chunks:
                 if c.metadata.get('embedding') is None:
                     c.metadata['embedding'] = self._llm.embed(c.text)
+            _ck(f"  retrieve: diversity embed missing – done ({n_missing} embeds)", t)
+            t = _ck("  retrieve: greedy log-det – start")
             vectors = np.array([c.metadata['embedding'] for c in chunks], dtype=np.float32)
             query_vec = np.array(emb, dtype=np.float32)
             selected = greedy_log_det_select(vectors, query_vec, self.k_diverse, self.eta, self.rescale_power)
             chunks = [chunks[i] for i in selected]
+            _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)})", t)
         
+        _ck(f"retrieve – TOTAL ({len(chunks)} chunks returned)", t_retrieve)
         return chunks
 
 # =============================================================================
@@ -530,7 +576,7 @@ class DecomposedRAGPipeline:
     def _get_subquestions(self, question: str, answer: str) -> list[str]:
         resp = self.llm.complete(GAP_DECOMPOSE_PROMPT.format(
             question=question, preliminary_answer=answer, max_sub_questions=self.max_sub_q
-        ))
+        ), label="LLM gap-decompose")
         try:
             match = re.search(r'\[.*\]', resp, re.DOTALL)
             if match:
@@ -544,7 +590,7 @@ class DecomposedRAGPipeline:
     def _answer_subquestion(self, sub_q: str) -> SubQuestionResult:
         chunks = self.retriever.retrieve(sub_q)
         context = self._format_context(chunks)
-        answer = self.llm.complete(SUBQUESTION_PROMPT.format(context=context, question=sub_q))
+        answer = self.llm.complete(SUBQUESTION_PROMPT.format(context=context, question=sub_q), label=f"LLM sub-Q answer")
         return SubQuestionResult(
             sub_question=sub_q,
             retrieved_chunks=[{"chunk_id": c.chunk_id, "content": c.text, "metadata": {k: v for k, v in c.metadata.items() if k != 'embedding'}} for c in chunks],
@@ -552,22 +598,31 @@ class DecomposedRAGPipeline:
         )
     
     def run(self, question: str) -> dict:
+        t_run = _ck(f"pipeline.run – start")
         # Initial retrieval
+        t = _ck("pipeline: initial retrieve – start")
         initial_chunks = self.retriever.retrieve(question)
+        _ck(f"pipeline: initial retrieve – done ({len(initial_chunks)} chunks)", t)
         initial_context = self._format_context(initial_chunks)
-        preliminary = self.llm.complete(PRELIMINARY_PROMPT.format(context=initial_context, question=question))
+        preliminary = self.llm.complete(PRELIMINARY_PROMPT.format(context=initial_context, question=question),
+                                        label="LLM preliminary")
+        _ck("pipeline: preliminary answer – done", t_run)
         
         rounds, all_subs = [], []
         current = preliminary
         
         for rnd in range(1, self.num_rounds + 1):
+            t_rnd = _ck(f"pipeline: round {rnd} – start")
             sub_qs = self._get_subquestions(question, current)
+            _ck(f"pipeline: round {rnd} gap-decompose – done ({len(sub_qs)} sub-Qs)", t_rnd)
             if not sub_qs:
                 break
             
             # Process sub-questions in parallel
+            t = _ck(f"pipeline: round {rnd} sub-Q parallel ({len(sub_qs)}) – start")
             with ThreadPoolExecutor(max_workers=len(sub_qs)) as ex:
                 sub_results = list(ex.map(self._answer_subquestion, sub_qs))
+            _ck(f"pipeline: round {rnd} sub-Q parallel – done", t)
             all_subs.extend(sub_results)
             
             if rnd < self.num_rounds:
@@ -575,18 +630,23 @@ class DecomposedRAGPipeline:
                 sub_ctx = "\n\n".join(f"Q: {s.sub_question}\nA: {s.answer}" for s in all_subs)
                 regen = self.llm.complete(REGENERATE_PROMPT.format(
                     question=question, previous_answer=current, sub_qa_context=sub_ctx
-                ))
+                ), label=f"LLM regenerate rnd {rnd}")
                 rounds.append(RoundResult(rnd, current, sub_results, regen))
                 current = regen
+                _ck(f"pipeline: round {rnd} regenerate – done", t_rnd)
             else:
                 rounds.append(RoundResult(rnd, current, sub_results, None))
+            _ck(f"pipeline: round {rnd} – TOTAL", t_rnd)
         
         # Synthesize
+        t = _ck("pipeline: synthesis – start")
         sub_pairs = "\n\n".join(f"Q{i+1}: {s.sub_question}\nA{i+1}: {s.answer}" for i, s in enumerate(all_subs))
         final = self.llm.complete(SYNTHESIS_PROMPT.format(
             original_question=question, preliminary_answer=current, sub_qa_pairs=sub_pairs or "None"
-        ))
+        ), label="LLM synthesis")
+        _ck("pipeline: synthesis – done", t)
         
+        _ck("pipeline.run – TOTAL", t_run)
         return {
             "initial_chunks": [{"id": c.chunk_id, "src": c.metadata.get('_data_source'), "content": c.text} for c in initial_chunks],
             "initial_answer": preliminary,
@@ -626,14 +686,23 @@ def main():
     parser.add_argument("--max-workers", type=int, default=CONFIG["execution"]["max_workers"])
     parser.add_argument("--questions-path", type=Path, default=Path(CONFIG["paths"]["questions_path"]))
     parser.add_argument("--output-root", type=Path, default=Path(CONFIG["paths"]["output_root"]))
+    parser.add_argument("--timing", action="store_true", help="Print timing checkpoints for each major operation")
     args = parser.parse_args()
+
+    global _TIMING, _t0
+    _TIMING = args.timing
+    _t0 = time.perf_counter()
     
     total_k = args.k_fulltext + args.k_structured + args.k_unstructured
     print(f"Decomposed RAG: fulltext={args.k_fulltext}, structured={args.k_structured}, unstructured={args.k_unstructured}, diverse={args.k_diverse}")
-    
+    if _TIMING:
+        print("[TIMING enabled] All checkpoints printed as +<step_elapsed>s (total <from_start>s)")
+
+    t = _ck("retriever.initialize – start")
     retriever = CombinedRetriever(args.k_fulltext, args.k_structured, args.k_unstructured,
                                   args.k_diverse, args.eta, args.rescale_power)
     retriever.initialize()
+    _ck("retriever.initialize – done", t)
     llm = LLMClient()
     pipeline = DecomposedRAGPipeline(retriever, llm, args.max_sub_questions, args.rounds)
     
