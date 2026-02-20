@@ -51,9 +51,8 @@ At minimum, set:
 - `llm.embed_endpoint`
 - `llm.llm_model`
 - `llm.embed_model`
-- `llm.azure_openai_key` (if not using RBAC for OpenAI)
+- `llm.azure_openai_key` (if not using RBAC for OpenAI, i.e., `llm.use_rbac_auth: false`)
 - `cosmos.uri`
-- `cosmos.key`
 - `cosmos.database_name`
 - `cosmos.structured_container`
 - `cosmos.unstructured_container`
@@ -62,6 +61,15 @@ At minimum, set:
 - `cosmos.structured_documents_root` and/or `cosmos.unstructured_documents_root`
 - `paths.questions_path`
 - `paths.output_root`
+
+**Authentication options:**
+
+- **Cosmos DB**: Uses Entra ID RBAC by default (`cosmos.use_rbac_auth: true`).
+  - Set `cosmos.use_rbac_auth: false` to use key-based auth (requires `cosmos.key`).
+  - For RBAC: Ensure your identity has the "Cosmos DB Built-in Data Contributor" role assigned.
+  
+- **Azure OpenAI**: Uses key-based auth by default (`llm.use_rbac_auth: false`).
+  - Set `llm.use_rbac_auth: true` to use Entra ID RBAC (requires `llm.token_scope`).
 
 Optional but recommended for auto-creating missing containers:
 
@@ -139,8 +147,15 @@ Outputs are written to:
   - Verify `llm.llm_endpoint`, `llm.llm_model`, `llm.api_version`, and auth (`llm.azure_openai_key` or RBAC settings).
 
 - **Azure OpenAI auth errors (401/403)**
-  - If using key auth, ensure `llm.azure_openai_key` is valid and maps to the configured endpoint.
+  - If using key auth (`llm.use_rbac_auth: false`), ensure `llm.azure_openai_key` is valid and maps to the configured endpoint.
   - If using RBAC (`llm.use_rbac_auth: true`), make sure your signed-in identity has Azure OpenAI access and `llm.token_scope` is correct.
+
+- **Cosmos DB auth errors (403/Forbidden)**
+  - If using RBAC (`cosmos.use_rbac_auth: true`, the default), ensure your identity has the appropriate Cosmos DB data plane role:
+    - For read-only: Assign role ID `00000000-0000-0000-0000-000000000001` (Cosmos DB Built-in Data Reader)
+    - For read+write: Assign role ID `00000000-0000-0000-0000-000000000002` (Cosmos DB Built-in Data Contributor)
+    - Use Azure CLI: `az cosmosdb sql role assignment create --account-name <account> --resource-group <rg> --role-definition-id <role-id> --principal-id <your-user-id>`
+  - If using key auth (`cosmos.use_rbac_auth: false`), ensure `cosmos.key` is valid.
 
 - **Cosmos upload skipped for one branch**
   - Check that the corresponding root path is populated:

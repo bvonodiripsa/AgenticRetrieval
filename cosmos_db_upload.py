@@ -605,9 +605,10 @@ def main():
         print("   Example: cosmos.uri: https://your-account.documents.azure.com:443/")
         return
     
-    if not COSMOS_KEY:
+    use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
+    if not use_rbac_auth and not COSMOS_KEY:
         print("❌ Error: Cosmos DB key not configured.")
-        print("   Please set cosmos.key in config.yaml.")
+        print("   Please set cosmos.key in config.yaml or set cosmos.use_rbac_auth to true for RBAC auth.")
         return
     
     if not EMBED_ENDPOINT:
@@ -667,8 +668,8 @@ def main():
             target["documents_root"] = args.documents_root
 
     print("\n🔌 Initializing clients...")
-    cosmos_client = get_cosmos_client(use_rbac_auth=False)
-    print("✓ Cosmos client initialized (key auth)")
+    use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
+    cosmos_client = get_cosmos_client(use_rbac_auth=use_rbac_auth)
 
     # Initialize embedding client (single endpoint/model)
     embed_client = get_embedding_client()

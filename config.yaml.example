@@ -52,6 +52,7 @@ cosmos:
   structured_partition_key_path: "/taxonomy"
   unstructured_container: "unstructured"
   unstructured_partition_key_path: "/url"
+  use_rbac_auth: false
 
   # Upload settings used by cosmos_db_upload.py
   cosmos_account_name: ""

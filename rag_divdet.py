@@ -314,6 +314,14 @@ class LLMClient:
                 except Exception:
                     pass
                 raise RuntimeError(f"Embedding endpoint HTTP {e.code}: {detail[:300]}") from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(
+                    f"Cannot connect to embedding service at {embed_endpoint}. "
+                    f"Please ensure Ollama (or your configured embedding service) is running and accessible. "
+                    f"Error: {e.reason}"
+                ) from e
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Invalid JSON response from embedding endpoint {embed_endpoint}: {e}") from e
 
         result = self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
         return self._normalize_embedding(result.data[0].embedding)
@@ -393,8 +401,16 @@ class CombinedRetriever:
         return "c." + ".".join(segments)
     
     def initialize(self):
-        #self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=DefaultAzureCredential())
-        self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=COSMOS_KEY, connection_mode="Direct")
+        use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
+        if use_rbac_auth:
+            credential = DefaultAzureCredential()
+            print("✓ Using Entra ID RBAC authentication for Cosmos DB")
+            self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=credential, connection_mode="Direct")
+        else:
+            if not COSMOS_KEY:
+                raise ValueError("Cosmos DB key not configured. Set cosmos.key in config.yaml.")
+            print("✓ Using key-based authentication for Cosmos DB")
+            self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=COSMOS_KEY, connection_mode="Direct")
         self._db = self._cosmos.get_database_client(DATABASE_NAME)
         self._structured = self._db.get_container_client(CONTAINER_STRUCTURED)
         self._unstructured = self._db.get_container_client(CONTAINER_UNSTRUCTURED)
