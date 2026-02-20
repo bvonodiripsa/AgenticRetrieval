@@ -147,6 +147,15 @@ Each line has the form:
 
 `+<step_elapsed>` is the time for that individual step; `total` is the cumulative wall-clock time from program start.
 
+Immediately before each Cosmos DB call, the actual query is also printed as a `[QUERY]` line:
+
+```
+  [QUERY] fulltext SQL: SELECT TOP 5 * FROM c ORDER BY RANK FullTextScore(c.designation, "bearing", "load")
+  [QUERY] vector SQL (structured): SELECT TOP @k c.id, c.part_number AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=10, @emb=<1536-dim vector>]
+```
+
+The embedding vector is summarised as `<N-dim vector>` to keep the output readable.
+
 | Checkpoint label | What is measured |
 |---|---|
 | `retriever.initialize` | Cosmos DB client construction and credential handshake |
