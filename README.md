@@ -151,7 +151,8 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 
 ```
   [QUERY] fulltext SQL: SELECT TOP 5 * FROM c ORDER BY RANK FullTextScore(c.designation, "bearing", "load")
-  [QUERY] vector SQL (structured): SELECT TOP @k c.id, c.part_number AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=10, @emb=<1536-dim vector>]
+  [QUERY] vector SQL (structured): SELECT TOP @k c.id, c.part_number AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=10, @emb=<1536-dim vector>, text='What is the maximum load rating for bearing XYZ?']
+  [QUERY] vector SQL (unsdata): SELECT TOP @k c.id, c.url AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=65, @emb=<1024-dim vector>, text='What is the maximum load rating for bearing XYZ?']
 ```
 
 The embedding vector is summarised as `<N-dim vector>` to keep the output readable.
