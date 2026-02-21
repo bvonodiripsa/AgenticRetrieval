@@ -524,31 +524,48 @@ class CombinedRetriever:
     def retrieve(self, query: str) -> list[RetrievedChunk]:
         t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
         chunks, seen = [], set()
-        
-        # Fulltext
-        t = _ck("  retrieve: fulltext – start")
-        for doc in self._fulltext_search(query, self.k_fulltext):
+
+        # Run fulltext search in a background thread while we embed + vector-search in parallel
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            t = _ck("  retrieve: fulltext – start (parallel)")
+            ft_future = ex.submit(self._fulltext_search, query, self.k_fulltext)
+
+            # Embed in the main thread slot; both vector searches start as soon as embed finishes
+            t_emb = _ck("  retrieve: embed query – start")
+            emb = self._llm.embed(query)
+            _ck("  retrieve: embed query – done", t_emb)
+
+            t_str = _ck("  retrieve: structured vector – start (parallel)")
+            str_future = ex.submit(
+                self._vector_search,
+                self._structured, self._structured_partition_key_path, emb, self.k_structured, query
+            )
+            t_uns = _ck("  retrieve: unstructured vector – start (parallel)")
+            uns_future = ex.submit(
+                self._vector_search,
+                self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured, query
+            )
+
+            ft_docs = ft_future.result()
+            _ck(f"  retrieve: fulltext – done ({len(ft_docs)} results)", t)
+            str_docs = str_future.result()
+            _ck(f"  retrieve: structured vector – done ({len(str_docs)} results)", t_str)
+            uns_docs = uns_future.result()
+            _ck(f"  retrieve: unstructured vector – done ({len(uns_docs)} results)", t_uns)
+
+        # Merge: fulltext first, then structured, then unstructured (preserves priority order)
+        for doc in ft_docs:
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'fulltext'))
-        _ck(f"  retrieve: fulltext – done ({sum(1 for c in chunks if c.metadata.get('_data_source')=='fulltext')} chunks)", t)
-        
-        # Vector searches
-        t = _ck("  retrieve: embed query – start")
-        emb = self._llm.embed(query)
-        _ck("  retrieve: embed query – done", t)
-        t = _ck("  retrieve: structured vector – start")
-        for doc in self._vector_search(self._structured, self._structured_partition_key_path, emb, self.k_structured, query):
+        for doc in str_docs:
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'structured_vector'))
-        _ck(f"  retrieve: structured vector – done", t)
-        t = _ck("  retrieve: unstructured vector – start")
-        for doc in self._vector_search(self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured, query):
+        for doc in uns_docs:
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'unstructured_vector'))
-        _ck(f"  retrieve: unstructured vector – done", t)
         
         # Diversity selection via greedy log-det maximization
         if self.k_diverse > 0 and len(chunks) > self.k_diverse:

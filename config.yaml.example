@@ -5,7 +5,7 @@
 # Retrieval parameters
 retrieval:
   k_fulltext: 10
-  k_structured: 25
+  k_structured: 5
   k_unstructured: 65
   k_diverse: 80       # 0 = disabled; >0 = select this many diverse chunks via log-det
   eta: 0.0            # Gram matrix regularization
@@ -35,7 +35,7 @@ llm:
   embed_model: ""
   embed_dimensions: 1024
   temperature: 0.0
-  max_completion_tokens: 2048
+  max_completion_tokens: 4096
   max_retries: 2
   use_rbac_auth: false
   token_scope: ""
