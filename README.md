@@ -151,8 +151,8 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 
 ```
   [QUERY] fulltext SQL: SELECT TOP 5 * FROM c ORDER BY RANK FullTextScore(c.designation, "bearing", "load")
-  [QUERY] vector SQL (structured): SELECT TOP @k c.id, c.part_number AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=10, @emb=<1536-dim vector>, text='What is the maximum load rating for bearing XYZ?']
-  [QUERY] vector SQL (unsdata): SELECT TOP @k c.id, c.url AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)  [@k=65, @emb=<1024-dim vector>, text='What is the maximum load rating for bearing XYZ?']
+  [QUERY] vector SQL (structured): SELECT TOP @k c.id, c.taxonomy AS pkv, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)  [@k=10, @emb=<1536-dim vector>, text='What is the maximum load rating for bearing XYZ?']
+  [QUERY] vector SQL (unsdata): SELECT TOP @k c.id, c.url AS pkv, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)  [@k=65, @emb=<1024-dim vector>, text='What is the maximum load rating for bearing XYZ?']
 ```
 
 The embedding vector is summarised as `<N-dim vector>` to keep the output readable.
@@ -178,6 +178,25 @@ The embedding vector is summarised as `<N-dim vector>` to keep the output readab
 | `LLM regenerate rnd N – start/done` | LLM regeneration that integrates sub-answers between rounds |
 | `LLM synthesis – start/done` | Final LLM synthesis combining all sub-answers into the answer |
 | `pipeline.run – TOTAL` | End-to-end pipeline time for a single question |
+
+#### Activity ID tracking
+
+Vector query completion lines include real Cosmos DB Activity IDs pulled from response headers:
+
+```
+  [TIMING] vector query – done (5 results) [ActivityId=3a55d5f0-f6b5-4be8-a774-8bca3cb2bb56]: +6.493s  (total 8.887s)
+```
+
+For cross-partition queries that fan out to multiple backend requests, multiple IDs may be shown:
+
+```
+  [TIMING] vector query – done (65 results) [ActivityIds=id1, id2, id3, +2 more]: +1.242s  (total 3.637s)
+```
+
+This is useful for:
+- Cross-referencing slow queries with their RU consumption and execution times
+- Debugging query performance issues with Cosmos DB support
+- Providing exact request IDs when opening Azure support cases
 
 Typical bottlenecks to look for:
 

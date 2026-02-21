@@ -46,6 +46,50 @@ def _ck(label: str, ref: float | None = None) -> float:
     return now
 
 
+def _format_activity_id_note(activity_ids: list[str]) -> str:
+    unique_ids = list(dict.fromkeys(aid for aid in activity_ids if aid))
+    if not unique_ids:
+        return ""
+    if len(unique_ids) == 1:
+        return f" [ActivityId={unique_ids[0]}]"
+    shown = ", ".join(unique_ids[:3])
+    remaining = len(unique_ids) - 3
+    suffix = f", +{remaining} more" if remaining > 0 else ""
+    return f" [ActivityIds={shown}{suffix}]"
+
+
+def _multi_activity_reason(response_meta: list[dict[str, str]]) -> str:
+    if not response_meta:
+        return ""
+
+    activity_ids = [m.get("activity_id", "") for m in response_meta if m.get("activity_id")]
+    unique_ids = list(dict.fromkeys(activity_ids))
+    if len(unique_ids) <= 1:
+        return ""
+
+    partition_ranges = {m.get("partition_range_id", "") for m in response_meta if m.get("partition_range_id")}
+    physical_partitions = {m.get("physical_partition_id", "") for m in response_meta if m.get("physical_partition_id")}
+    continuation_count = sum(1 for m in response_meta if m.get("has_continuation") == "1")
+    retry_hint_count = sum(1 for m in response_meta if m.get("retry_after_ms"))
+
+    reasons: list[str] = []
+    if len(partition_ranges) > 1:
+        reasons.append(f"fan-out across {len(partition_ranges)} partition key ranges")
+    elif len(physical_partitions) > 1:
+        reasons.append(f"fan-out across {len(physical_partitions)} physical partitions")
+
+    if continuation_count > 0:
+        reasons.append(f"pagination/continuation on {continuation_count} response(s)")
+
+    if retry_hint_count > 0:
+        reasons.append(f"retry-after present on {retry_hint_count} response(s)")
+
+    if not reasons:
+        reasons.append("multiple backend executions (possible retries or internal query pipeline calls)")
+
+    return f" [Reason: {'; '.join(reasons)}]"
+
+
 # Load config from yaml
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 with open(_CONFIG_PATH) as _f:
@@ -461,12 +505,18 @@ class CombinedRetriever:
             if _TIMING:
                 with _print_lock:
                     print(f"  [QUERY] fulltext SQL: {sql}")
+
             t = _ck(f"fulltext query (top {top_k}) – start")
-            items = list(self._structured.query_items(
+
+            query_iterator = self._structured.query_items(
                 query=sql,
                 parameters=[],
                 enable_cross_partition_query=True
-            ))
+            )
+            items = []
+            for page in query_iterator.by_page():
+                items.extend(list(page))
+
             _ck(f"fulltext query – done ({len(items)} results)", t)
             return items
         except Exception as e:
@@ -483,18 +533,43 @@ class CombinedRetriever:
             elif len(adjusted_emb) < self._expected_vector_dim:
                 adjusted_emb = adjusted_emb + [0.0] * (self._expected_vector_dim - len(adjusted_emb))
         pk_expr = self._partition_key_expr(partition_key_path)
-        sql = f"SELECT TOP @k c.id, {pk_expr} AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)"
+        sql = f"SELECT TOP @k c.id, {pk_expr} AS pkv, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)"
         if _TIMING:
             with _print_lock:
                 text_preview = f", text={query_text!r}" if query_text else ""
                 print(f"  [QUERY] vector SQL ({container.id}): {sql}  [@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>{text_preview}]")
+
         t = _ck(f"vector query (top {top_k}, {container.id}) – start")
-        results = list(container.query_items(
+
+        activity_ids: list[str] = []
+        response_meta: list[dict[str, str]] = []
+
+        def _capture_activity_id(headers: dict[str, str], _: dict[str, Any]) -> None:
+            normalized_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+            activity_id = normalized_headers.get("x-ms-activity-id")
+            if activity_id:
+                activity_ids.append(activity_id)
+            response_meta.append({
+                "activity_id": activity_id or "",
+                "partition_range_id": normalized_headers.get("x-ms-documentdb-partitionkeyrangeid", ""),
+                "physical_partition_id": normalized_headers.get("x-ms-cosmos-physical-partition-id", ""),
+                "has_continuation": "1" if normalized_headers.get("x-ms-continuation") else "",
+                "retry_after_ms": normalized_headers.get("x-ms-retry-after-ms", ""),
+            })
+
+        query_iterator = container.query_items(
             query=sql,
             parameters=[{"name": "@k", "value": top_k}, {"name": "@emb", "value": adjusted_emb}],
-            enable_cross_partition_query=True
-        ))
-        _ck(f"vector query – done ({len(results)} results)", t)
+            enable_cross_partition_query=True,
+            response_hook=_capture_activity_id,
+        )
+        results = []
+        for page in query_iterator.by_page():
+            results.extend(list(page))
+
+        activity_id_note = _format_activity_id_note(activity_ids)
+        reason_note = _multi_activity_reason(response_meta)
+        _ck(f"vector query – done ({len(results)} results){activity_id_note}{reason_note}", t)
         docs = []
         t_reads = time.perf_counter()
         for r in results:
