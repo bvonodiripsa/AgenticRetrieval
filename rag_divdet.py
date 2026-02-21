@@ -473,7 +473,7 @@ class CombinedRetriever:
             print(f"Fulltext error: {e}")
             return []
     
-    def _vector_search(self, container, partition_key_path: str, query_emb: list[float], top_k: int) -> list[dict]:
+    def _vector_search(self, container, partition_key_path: str, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
         if top_k <= 0:
             return []
         adjusted_emb = [float(x) for x in query_emb]
@@ -486,7 +486,8 @@ class CombinedRetriever:
         sql = f"SELECT TOP @k c.id, {pk_expr} AS pkv, VectorDistance(c.e, @emb) AS score FROM c WHERE IS_DEFINED(c.e) ORDER BY VectorDistance(c.e, @emb)"
         if _TIMING:
             with _print_lock:
-                print(f"  [QUERY] vector SQL ({container.id}): {sql}  [@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>]")
+                text_preview = f", text={query_text!r}" if query_text else ""
+                print(f"  [QUERY] vector SQL ({container.id}): {sql}  [@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>{text_preview}]")
         t = _ck(f"vector query (top {top_k}, {container.id}) – start")
         results = list(container.query_items(
             query=sql,
@@ -537,13 +538,13 @@ class CombinedRetriever:
         emb = self._llm.embed(query)
         _ck("  retrieve: embed query – done", t)
         t = _ck("  retrieve: structured vector – start")
-        for doc in self._vector_search(self._structured, self._structured_partition_key_path, emb, self.k_structured):
+        for doc in self._vector_search(self._structured, self._structured_partition_key_path, emb, self.k_structured, query):
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'structured_vector'))
         _ck(f"  retrieve: structured vector – done", t)
         t = _ck("  retrieve: unstructured vector – start")
-        for doc in self._vector_search(self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured):
+        for doc in self._vector_search(self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured, query):
             if doc.get('id') not in seen:
                 seen.add(doc['id'])
                 chunks.append(self._format_doc(doc, 'unstructured_vector'))
