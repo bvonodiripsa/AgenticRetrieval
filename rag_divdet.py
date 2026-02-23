@@ -2,25 +2,25 @@
 """Self-contained Decomposed RAG with fulltext + vector search (concise version)."""
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import time
 import threading
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 
 import openai
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential, AzureCliCredential, get_bearer_token_provider
+from azure.cosmos.aio import CosmosClient
+from azure.identity.aio import DefaultAzureCredential
+from azure.identity import AzureCliCredential, get_bearer_token_provider
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 from tqdm import tqdm
 import numpy as np
 
@@ -300,7 +300,7 @@ class LLMClient:
         return values
     
     @property
-    def llm_client(self) -> AzureOpenAI:
+    def llm_client(self) -> AsyncAzureOpenAI:
         if not self._llm_client:
             client_kwargs = {
                 "api_version": self._cfg["api_version"],
@@ -312,11 +312,11 @@ class LLMClient:
                 if not self._api_key or not str(self._api_key).strip():
                     raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
                 client_kwargs["api_key"] = self._api_key
-            self._llm_client = AzureOpenAI(**client_kwargs)
+            self._llm_client = AsyncAzureOpenAI(**client_kwargs)
         return self._llm_client
     
     @property
-    def embed_client(self) -> AzureOpenAI:
+    def embed_client(self) -> AsyncAzureOpenAI:
         if not self._embed_client:
             client_kwargs = {
                 "api_version": self._cfg["api_version"],
@@ -328,71 +328,75 @@ class LLMClient:
                 if not self._api_key or not str(self._api_key).strip():
                     raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
                 client_kwargs["api_key"] = self._api_key
-            self._embed_client = AzureOpenAI(**client_kwargs)
+            self._embed_client = AsyncAzureOpenAI(**client_kwargs)
         return self._embed_client
     
-    def complete(self, prompt: str, retries: int = None, label: str = "LLM complete") -> str:
+    async def complete(self, prompt: str, retries: int | None = None, label: str = "LLM complete") -> str:
         if retries is None:
-            retries = self._cfg["max_retries"]
+            retries = int(self._cfg["max_retries"])
         for attempt in range(retries):
             try:
                 t = _ck(f"{label} – start")
-                result = self.llm_client.chat.completions.create(
+                result = await self.llm_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
                     model=self._cfg["llm_model"],
                     temperature=self._cfg["temperature"],
                     max_completion_tokens=self._cfg["max_completion_tokens"],
                 )
                 _ck(f"{label} – done", t)
-                return result.choices[0].message.content
+                return result.choices[0].message.content or ""
             except openai.RateLimitError:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
                 print(f"Rate limited, retry in {wait}s ({attempt + 1}/{retries})")
-                time.sleep(wait)
+                await asyncio.sleep(wait)
             except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
                 print(f"API error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
-                time.sleep(wait)
+                await asyncio.sleep(wait)
         raise Exception("Max retries exceeded")
     
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
         embed_endpoint = str(self._cfg.get("embed_endpoint", "")).strip()
         if embed_endpoint.endswith("/api/embeddings"):
-            payload = json.dumps({"model": self._cfg["embed_model"], "prompt": text}).encode("utf-8")
-            req = urllib.request.Request(
-                embed_endpoint,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
             try:
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    body = response.read().decode("utf-8")
+                async with httpx.AsyncClient(timeout=60) as client:
+                    response = await client.post(
+                        embed_endpoint,
+                        json={"model": self._cfg["embed_model"], "prompt": text},
+                        headers={"Content-Type": "application/json"},
+                    )
+                response.raise_for_status()
+                body = response.text
                 parsed = json.loads(body)
                 embedding = parsed.get("embedding")
                 if not isinstance(embedding, list):
                     raise ValueError("Invalid Ollama embedding response: missing 'embedding' list")
                 return self._normalize_embedding(embedding)
-            except urllib.error.HTTPError as e:
-                detail = ""
-                try:
-                    detail = e.read().decode("utf-8")
-                except Exception:
-                    pass
-                raise RuntimeError(f"Embedding endpoint HTTP {e.code}: {detail[:300]}") from e
-            except urllib.error.URLError as e:
+            except httpx.HTTPStatusError as e:
+                detail = e.response.text if e.response is not None else ""
+                status = e.response.status_code if e.response is not None else "unknown"
+                raise RuntimeError(f"Embedding endpoint HTTP {status}: {detail[:300]}") from e
+            except httpx.RequestError as e:
                 raise RuntimeError(
                     f"Cannot connect to embedding service at {embed_endpoint}. "
                     f"Please ensure Ollama (or your configured embedding service) is running and accessible. "
-                    f"Error: {e.reason}"
+                    f"Error: {e}"
                 ) from e
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"Invalid JSON response from embedding endpoint {embed_endpoint}: {e}") from e
 
         t = _ck("embed – start")
-        result = self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
+        result = await self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
         _ck("embed – done", t)
         return self._normalize_embedding(result.data[0].embedding)
+
+    async def close(self):
+        if self._llm_client is not None:
+            await self._llm_client.close()
+            self._llm_client = None
+        if self._embed_client is not None:
+            await self._embed_client.close()
+            self._embed_client = None
 
 # =============================================================================
 # COSMOS DB RETRIEVER
@@ -461,6 +465,7 @@ class CombinedRetriever:
         self._expected_vector_dim = int(CONFIG.get("llm", {}).get("embed_dimensions") or 0)
         self._structured_partition_key_path = str(COSMOS_STRUCTURED_PARTITION_KEY_PATH or "").strip()
         self._unstructured_partition_key_path = str(COSMOS_UNSTRUCTURED_PARTITION_KEY_PATH or "").strip()
+        self._credential = None
 
     def _partition_key_expr(self, partition_key_path: str) -> str:
         segments = [s for s in partition_key_path.split("/") if s]
@@ -468,10 +473,11 @@ class CombinedRetriever:
             raise ValueError("Cosmos partition key path is not configured")
         return "c." + ".".join(segments)
     
-    def initialize(self):
+    async def initialize(self):
         use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
         if use_rbac_auth:
             credential = DefaultAzureCredential()
+            self._credential = credential
             print("✓ Using Entra ID RBAC authentication for Cosmos DB")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=credential, connection_mode="Direct")
         else:
@@ -484,7 +490,9 @@ class CombinedRetriever:
         self._unstructured = self._db.get_container_client(CONTAINER_UNSTRUCTURED)
         self._llm = LLMClient()
     
-    def _fulltext_search(self, query: str, top_k: int) -> list[dict]:
+    async def _fulltext_search(self, query: str, top_k: int) -> list[dict]:
+        if self._structured is None:
+            raise RuntimeError("Retriever is not initialized")
         if top_k <= 0:
             return []
         terms = [t for t in re.findall(r'\w+', query) if t.lower() not in STOPWORDS and len(t) > 1]
@@ -510,12 +518,11 @@ class CombinedRetriever:
 
             query_iterator = self._structured.query_items(
                 query=sql,
-                parameters=[],
-                enable_cross_partition_query=True
+                parameters=[]
             )
             items = []
-            for page in query_iterator.by_page():
-                items.extend(list(page))
+            async for item in query_iterator:
+                items.append(item)
 
             _ck(f"fulltext query – done ({len(items)} results)", t)
             return items
@@ -523,7 +530,7 @@ class CombinedRetriever:
             print(f"Fulltext error: {e}")
             return []
     
-    def _vector_search(self, container, partition_key_path: str, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
+    async def _vector_search(self, container, partition_key_path: str, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
         if top_k <= 0:
             return []
         adjusted_emb = [float(x) for x in query_emb]
@@ -560,23 +567,27 @@ class CombinedRetriever:
         query_iterator = container.query_items(
             query=sql,
             parameters=[{"name": "@k", "value": top_k}, {"name": "@emb", "value": adjusted_emb}],
-            enable_cross_partition_query=True,
             response_hook=_capture_activity_id,
         )
         results = []
-        for page in query_iterator.by_page():
-            results.extend(list(page))
+        async for item in query_iterator:
+            results.append(item)
 
         activity_id_note = _format_activity_id_note(activity_ids)
         reason_note = _multi_activity_reason(response_meta)
         _ck(f"vector query – done ({len(results)} results){activity_id_note}{reason_note}", t)
         docs = []
         t_reads = time.perf_counter()
+        read_coros = []
+        result_refs = []
         for r in results:
             partition_key_value = r.get("pkv")
             if partition_key_value is None:
                 continue
-            doc = container.read_item(item=r["id"], partition_key=partition_key_value)
+            read_coros.append(container.read_item(item=r["id"], partition_key=partition_key_value))
+            result_refs.append(r)
+        read_docs = await asyncio.gather(*read_coros) if read_coros else []
+        for r, doc in zip(result_refs, read_docs):
             doc["_score"] = r.get("score")
             docs.append(doc)
         _ck(f"read_item x{len(docs)} ({container.id}) – done", t_reads)
@@ -596,37 +607,36 @@ class CombinedRetriever:
             metadata={'_data_source': source, 'embedding': embedding}
         )
     
-    def retrieve(self, query: str) -> list[RetrievedChunk]:
+    async def retrieve(self, query: str) -> list[RetrievedChunk]:
+        if self._llm is None or self._structured is None or self._unstructured is None:
+            raise RuntimeError("Retriever is not initialized")
         t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
         chunks, seen = [], set()
 
-        # Run fulltext search in a background thread while we embed + vector-search in parallel
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            t = _ck("  retrieve: fulltext – start (parallel)")
-            ft_future = ex.submit(self._fulltext_search, query, self.k_fulltext)
+        t = _ck("  retrieve: fulltext – start (parallel)")
+        ft_task = asyncio.create_task(self._fulltext_search(query, self.k_fulltext))
 
-            # Embed in the main thread slot; both vector searches start as soon as embed finishes
-            t_emb = _ck("  retrieve: embed query – start")
-            emb = self._llm.embed(query)
-            _ck("  retrieve: embed query – done", t_emb)
+        t_emb = _ck("  retrieve: embed query – start")
+        emb = await self._llm.embed(query)
+        _ck("  retrieve: embed query – done", t_emb)
 
-            t_str = _ck("  retrieve: structured vector – start (parallel)")
-            str_future = ex.submit(
-                self._vector_search,
+        t_str = _ck("  retrieve: structured vector – start (parallel)")
+        t_uns = _ck("  retrieve: unstructured vector – start (parallel)")
+        str_task = asyncio.create_task(
+            self._vector_search(
                 self._structured, self._structured_partition_key_path, emb, self.k_structured, query
             )
-            t_uns = _ck("  retrieve: unstructured vector – start (parallel)")
-            uns_future = ex.submit(
-                self._vector_search,
+        )
+        uns_task = asyncio.create_task(
+            self._vector_search(
                 self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured, query
             )
+        )
 
-            ft_docs = ft_future.result()
-            _ck(f"  retrieve: fulltext – done ({len(ft_docs)} results)", t)
-            str_docs = str_future.result()
-            _ck(f"  retrieve: structured vector – done ({len(str_docs)} results)", t_str)
-            uns_docs = uns_future.result()
-            _ck(f"  retrieve: unstructured vector – done ({len(uns_docs)} results)", t_uns)
+        ft_docs, str_docs, uns_docs = await asyncio.gather(ft_task, str_task, uns_task)
+        _ck(f"  retrieve: fulltext – done ({len(ft_docs)} results)", t)
+        _ck(f"  retrieve: structured vector – done ({len(str_docs)} results)", t_str)
+        _ck(f"  retrieve: unstructured vector – done ({len(uns_docs)} results)", t_uns)
 
         # Merge: fulltext first, then structured, then unstructured (preserves priority order)
         for doc in ft_docs:
@@ -645,10 +655,12 @@ class CombinedRetriever:
         # Diversity selection via greedy log-det maximization
         if self.k_diverse > 0 and len(chunks) > self.k_diverse:
             t = _ck("  retrieve: diversity embed missing – start")
-            n_missing = sum(1 for c in chunks if c.metadata.get('embedding') is None)
-            for c in chunks:
-                if c.metadata.get('embedding') is None:
-                    c.metadata['embedding'] = self._llm.embed(c.text)
+            missing_chunks = [c for c in chunks if c.metadata.get('embedding') is None]
+            n_missing = len(missing_chunks)
+            if missing_chunks:
+                missing_embeddings = await asyncio.gather(*(self._llm.embed(c.text) for c in missing_chunks))
+                for chunk, embedding in zip(missing_chunks, missing_embeddings):
+                    chunk.metadata['embedding'] = embedding
             _ck(f"  retrieve: diversity embed missing – done ({n_missing} embeds)", t)
             t = _ck("  retrieve: greedy log-det – start")
             vectors = np.array([c.metadata['embedding'] for c in chunks], dtype=np.float32)
@@ -659,6 +671,17 @@ class CombinedRetriever:
         
         _ck(f"retrieve – TOTAL ({len(chunks)} chunks returned)", t_retrieve)
         return chunks
+
+    async def close(self):
+        if self._llm is not None:
+            await self._llm.close()
+            self._llm = None
+        if self._cosmos is not None:
+            await self._cosmos.close()
+            self._cosmos = None
+        if self._credential is not None:
+            await self._credential.close()
+            self._credential = None
 
 # =============================================================================
 # DECOMPOSED RAG PIPELINE
@@ -674,8 +697,8 @@ class DecomposedRAGPipeline:
     def _format_context(self, chunks: list[RetrievedChunk]) -> str:
         return "\n\n".join(f"[{i+1}] {c.text}" for i, c in enumerate(chunks))
     
-    def _get_subquestions(self, question: str, answer: str) -> list[str]:
-        resp = self.llm.complete(GAP_DECOMPOSE_PROMPT.format(
+    async def _get_subquestions(self, question: str, answer: str) -> list[str]:
+        resp = await self.llm.complete(GAP_DECOMPOSE_PROMPT.format(
             question=question, preliminary_answer=answer, max_sub_questions=self.max_sub_q
         ), label="LLM gap-decompose")
         try:
@@ -688,24 +711,24 @@ class DecomposedRAGPipeline:
             pass
         return []
     
-    def _answer_subquestion(self, sub_q: str) -> SubQuestionResult:
-        chunks = self.retriever.retrieve(sub_q)
+    async def _answer_subquestion(self, sub_q: str) -> SubQuestionResult:
+        chunks = await self.retriever.retrieve(sub_q)
         context = self._format_context(chunks)
-        answer = self.llm.complete(SUBQUESTION_PROMPT.format(context=context, question=sub_q), label=f"LLM sub-Q answer")
+        answer = await self.llm.complete(SUBQUESTION_PROMPT.format(context=context, question=sub_q), label=f"LLM sub-Q answer")
         return SubQuestionResult(
             sub_question=sub_q,
             retrieved_chunks=[{"chunk_id": c.chunk_id, "content": c.text, "metadata": {k: v for k, v in c.metadata.items() if k != 'embedding'}} for c in chunks],
             answer=answer
         )
     
-    def run(self, question: str) -> dict:
+    async def run(self, question: str) -> dict:
         t_run = _ck(f"pipeline.run – start")
         # Initial retrieval
         t = _ck("pipeline: initial retrieve – start")
-        initial_chunks = self.retriever.retrieve(question)
+        initial_chunks = await self.retriever.retrieve(question)
         _ck(f"pipeline: initial retrieve – done ({len(initial_chunks)} chunks)", t)
         initial_context = self._format_context(initial_chunks)
-        preliminary = self.llm.complete(PRELIMINARY_PROMPT.format(context=initial_context, question=question),
+        preliminary = await self.llm.complete(PRELIMINARY_PROMPT.format(context=initial_context, question=question),
                                         label="LLM preliminary")
         _ck("pipeline: preliminary answer – done", t_run)
         
@@ -714,22 +737,21 @@ class DecomposedRAGPipeline:
         
         for rnd in range(1, self.num_rounds + 1):
             t_rnd = _ck(f"pipeline: round {rnd} – start")
-            sub_qs = self._get_subquestions(question, current)
+            sub_qs = await self._get_subquestions(question, current)
             _ck(f"pipeline: round {rnd} gap-decompose – done ({len(sub_qs)} sub-Qs)", t_rnd)
             if not sub_qs:
                 break
             
             # Process sub-questions in parallel
             t = _ck(f"pipeline: round {rnd} sub-Q parallel ({len(sub_qs)}) – start")
-            with ThreadPoolExecutor(max_workers=len(sub_qs)) as ex:
-                sub_results = list(ex.map(self._answer_subquestion, sub_qs))
+            sub_results = await asyncio.gather(*(self._answer_subquestion(sub_q) for sub_q in sub_qs))
             _ck(f"pipeline: round {rnd} sub-Q parallel – done", t)
             all_subs.extend(sub_results)
             
             if rnd < self.num_rounds:
                 # Regenerate
                 sub_ctx = "\n\n".join(f"Q: {s.sub_question}\nA: {s.answer}" for s in all_subs)
-                regen = self.llm.complete(REGENERATE_PROMPT.format(
+                regen = await self.llm.complete(REGENERATE_PROMPT.format(
                     question=question, previous_answer=current, sub_qa_context=sub_ctx
                 ), label=f"LLM regenerate rnd {rnd}")
                 rounds.append(RoundResult(rnd, current, sub_results, regen))
@@ -742,7 +764,7 @@ class DecomposedRAGPipeline:
         # Synthesize
         t = _ck("pipeline: synthesis – start")
         sub_pairs = "\n\n".join(f"Q{i+1}: {s.sub_question}\nA{i+1}: {s.answer}" for i, s in enumerate(all_subs))
-        final = self.llm.complete(SYNTHESIS_PROMPT.format(
+        final = await self.llm.complete(SYNTHESIS_PROMPT.format(
             original_question=question, preliminary_answer=current, sub_qa_pairs=sub_pairs or "None"
         ), label="LLM synthesis")
         _ck("pipeline: synthesis – done", t)
@@ -772,7 +794,7 @@ def load_questions(path: Path) -> list[Question]:
         questions.extend(Question(q["question_id"], q["question_text"], f.stem, q.get("answer")) for q in data)
     return questions
 
-def main():
+async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=None, help="Override config yaml path")
     parser.add_argument("--k-fulltext", type=int, default=CONFIG["retrieval"]["k_fulltext"])
@@ -802,7 +824,7 @@ def main():
     t = _ck("retriever.initialize – start")
     retriever = CombinedRetriever(args.k_fulltext, args.k_structured, args.k_unstructured,
                                   args.k_diverse, args.eta, args.rescale_power)
-    retriever.initialize()
+    await retriever.initialize()
     _ck("retriever.initialize – done", t)
     llm = LLMClient()
     pipeline = DecomposedRAGPipeline(retriever, llm, args.max_sub_questions, args.rounds)
@@ -816,26 +838,36 @@ def main():
     output_path = args.output_root / f"k{total_k}_ft{args.k_fulltext}_str{args.k_structured}_uns{args.k_unstructured}{div_suffix}"
     output_path.mkdir(parents=True, exist_ok=True)
     
-    results, lock = [], threading.Lock()
-    
-    def process(q):
-        result = pipeline.run(q.question_text)
+    results = []
+
+    async def process(q: Question):
+        result = await pipeline.run(q.question_text)
         result["question_id"] = q.question_id
         result["question_text"] = q.question_text
         result["group"] = q.group
         result["ground_truth"] = q.ground_truth
-        (output_path / "intermediate" / q.group).mkdir(parents=True, exist_ok=True)
-        (output_path / "intermediate" / q.group / f"{q.question_id}.json").write_text(json.dumps(result, indent=2))
+        group_name = q.group or "default"
+        group_dir = output_path / "intermediate" / group_name
+        await asyncio.to_thread(group_dir.mkdir, parents=True, exist_ok=True)
+        result_file = group_dir / f"{q.question_id}.json"
+        await asyncio.to_thread(result_file.write_text, json.dumps(result, indent=2))
         return result
-    
-    with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-        futures = {ex.submit(process, q): q for q in questions}
-        for f in tqdm(as_completed(futures), total=len(questions)):
+
+    semaphore = asyncio.Semaphore(max(1, args.max_workers))
+
+    async def bounded_process(q: Question):
+        async with semaphore:
+            return await process(q)
+
+    tasks = [asyncio.create_task(bounded_process(q)) for q in questions]
+    with tqdm(total=len(questions)) as pbar:
+        for task in asyncio.as_completed(tasks):
             try:
-                with lock:
-                    results.append(f.result())
+                results.append(await task)
             except Exception as e:
-                print(f"Error: {futures[f].question_id}: {e}")
+                print(f"Error: {e}")
+            finally:
+                pbar.update(1)
     
     # Save final results - group by question group
     grouped = {}
@@ -849,8 +881,11 @@ def main():
             "answer": r["final_answer"],
             "ground_truth": r.get("ground_truth")
         })
-    (output_path / "questions_with_answers.json").write_text(json.dumps(grouped, indent=2))
+    await asyncio.to_thread((output_path / "questions_with_answers.json").write_text, json.dumps(grouped, indent=2))
     print(f"Done! Results: {output_path}")
 
+    await retriever.close()
+    await llm.close()
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())

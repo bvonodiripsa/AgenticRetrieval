@@ -1,6 +1,8 @@
 azure-cosmos
 azure-identity
 azure-mgmt-cosmosdb
+aiohttp
+httpx
 numpy
 openai
 python-dotenv

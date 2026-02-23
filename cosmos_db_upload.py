@@ -14,15 +14,18 @@ This script:
 
 import os
 import argparse
+import asyncio
 import json
 import time
 import re
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
-from azure.cosmos import CosmosClient, exceptions
+import httpx
+from azure.cosmos.aio import CosmosClient
+from azure.cosmos import exceptions
 from azure.core.exceptions import HttpResponseError
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
 from azure.mgmt.cosmosdb import CosmosDBManagementClient
 from azure.mgmt.cosmosdb.models import (
     SqlDatabaseCreateUpdateParameters,
@@ -43,15 +46,13 @@ from azure.mgmt.cosmosdb.models import (
     FullTextPath,
     FullTextIndexPath,
 )
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 from tqdm import tqdm
-import requests
 import yaml
 from pathlib import Path
 
 LOCAL_EMBED_WORKERS = 8
 UPLOAD_WORKERS = 8
-_HTTP_SESSION = requests.Session()
 
 # Load config from yaml
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -110,7 +111,7 @@ def _normalize_embedding(embedding: List[float]) -> List[float]:
     return values
 
 
-def get_embedding_client() -> AzureOpenAI | None:
+def get_embedding_client() -> AsyncAzureOpenAI | None:
     """Initialize a single embedding client from llm.embed_endpoint/embed_model settings."""
     endpoint = EMBED_ENDPOINT.rstrip("/")
     if endpoint.endswith("/api/embeddings"):
@@ -123,7 +124,7 @@ def get_embedding_client() -> AzureOpenAI | None:
     if not AZURE_OPENAI_KEY or not str(AZURE_OPENAI_KEY).strip():
         raise ValueError("llm.azure_openai_key must be set for Azure OpenAI embedding endpoint")
 
-    return AzureOpenAI(
+    return AsyncAzureOpenAI(
         azure_endpoint=azure_endpoint,
         api_key=AZURE_OPENAI_KEY,
         api_version=LLM_API_VERSION,
@@ -138,7 +139,7 @@ def get_cosmos_client(use_rbac_auth: bool, credential=None) -> CosmosClient:
     if use_rbac_auth:
         # Use Entra ID RBAC authentication (DefaultAzureCredential)
         if credential is None:
-            credential = DefaultAzureCredential()
+            credential = AsyncDefaultAzureCredential()
         print("✓ Using Entra ID RBAC authentication for Cosmos DB")
         return CosmosClient(COSMOS_ENDPOINT, credential=credential)
     else:
@@ -473,7 +474,7 @@ def generate_embedding_text_unstructured(doc: Dict[str, Any]) -> str:
     return "\n".join(text_parts)
 
 
-def generate_embeddings_batch(embed_client: AzureOpenAI | None, texts: List[str]) -> List[List[float]]:
+async def generate_embeddings_batch(embed_client: AsyncAzureOpenAI | None, texts: List[str]) -> List[List[float]]:
     """Generate embeddings for a batch of texts from a single configured endpoint/model."""
     if EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings"):
         batch_endpoint = EMBED_ENDPOINT.rstrip("/")
@@ -482,13 +483,13 @@ def generate_embeddings_batch(embed_client: AzureOpenAI | None, texts: List[str]
 
         # Fast path for Ollama /api/embed with batched input
         try:
-            response = _HTTP_SESSION.post(
-                batch_endpoint,
-                json={"model": EMBED_MODEL, "input": texts},
-                timeout=180,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            async with httpx.AsyncClient(timeout=180) as client:
+                response = await client.post(
+                    batch_endpoint,
+                    json={"model": EMBED_MODEL, "input": texts},
+                )
+                response.raise_for_status()
+                payload = response.json()
             embeddings_payload = payload.get("embeddings")
             if isinstance(embeddings_payload, list) and len(embeddings_payload) == len(texts):
                 return [_normalize_embedding(embedding) for embedding in embeddings_payload]
@@ -496,26 +497,27 @@ def generate_embeddings_batch(embed_client: AzureOpenAI | None, texts: List[str]
             # Fallback to parallel single-item /api/embeddings requests
             pass
 
-        def embed_single(text: str) -> List[float]:
-            response = _HTTP_SESSION.post(
-                EMBED_ENDPOINT,
-                json={"model": EMBED_MODEL, "prompt": text},
-                timeout=180,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if "embedding" not in payload:
-                raise ValueError(f"Unexpected embedding response payload: {payload}")
-            return _normalize_embedding(payload["embedding"])
+        semaphore = asyncio.Semaphore(min(max(1, LOCAL_EMBED_WORKERS), len(texts)))
 
-        workers = min(max(1, LOCAL_EMBED_WORKERS), len(texts))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            return list(executor.map(embed_single, texts))
+        async def embed_single(text: str) -> List[float]:
+            async with semaphore:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    response = await client.post(
+                        EMBED_ENDPOINT,
+                        json={"model": EMBED_MODEL, "prompt": text},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                if "embedding" not in payload:
+                    raise ValueError(f"Unexpected embedding response payload: {payload}")
+                return _normalize_embedding(payload["embedding"])
+
+        return await asyncio.gather(*(embed_single(text) for text in texts))
 
     if embed_client is None:
         raise ValueError("Embedding client is not initialized for Azure OpenAI endpoint")
 
-    response = embed_client.embeddings.create(
+    response = await embed_client.embeddings.create(
         input=texts,
         model=EMBED_MODEL,
         dimensions=EMBEDDING_DIMENSIONS,
@@ -537,11 +539,13 @@ def find_all_input_files(root_path: str) -> List[str]:
     return input_files
 
 
-def load_json_document(file_path: str) -> Optional[Dict[str, Any]]:
+async def load_json_document(file_path: str) -> Optional[Dict[str, Any]]:
     """Load a JSON document from file."""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        def _load() -> Dict[str, Any]:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return await asyncio.to_thread(_load)
     except json.JSONDecodeError as e:
         print(f"Error parsing JSON file {file_path}: {e}")
         return None
@@ -558,10 +562,10 @@ def replace_document_id(doc: Dict[str, Any], relative_path: str) -> Dict[str, An
     return doc
 
 
-def upload_document(container, doc: Dict[str, Any]) -> bool:
+async def upload_document(container, doc: Dict[str, Any]) -> bool:
     """Upload a single document to Cosmos DB."""
     try:
-        container.upsert_item(doc)
+        await container.upsert_item(doc)
         return True
     except exceptions.CosmosHttpResponseError as e:
         doc_id = doc["id"] if "id" in doc else "unknown"
@@ -569,19 +573,23 @@ def upload_document(container, doc: Dict[str, Any]) -> bool:
         return False
 
 
-def upload_documents_batch(container, docs: List[Dict[str, Any]]) -> tuple[int, int]:
+async def upload_documents_batch(container, docs: List[Dict[str, Any]]) -> tuple[int, int]:
     """Upload a batch of docs in parallel. Returns (success_count, failed_count)."""
     if not docs:
         return 0, 0
 
-    workers = min(max(1, UPLOAD_WORKERS), len(docs))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        results = list(executor.map(lambda item: upload_document(container, item), docs))
+    semaphore = asyncio.Semaphore(min(max(1, UPLOAD_WORKERS), len(docs)))
+
+    async def _upload(item: Dict[str, Any]) -> bool:
+        async with semaphore:
+            return await upload_document(container, item)
+
+    results = await asyncio.gather(*(_upload(item) for item in docs))
     success_count = sum(1 for result in results if result)
     return success_count, len(results) - success_count
 
 
-def main():
+async def main_async():
     """Main function to orchestrate the upload process."""
     parser = argparse.ArgumentParser(description="Upload JSON documents with embeddings to Cosmos DB")
     parser.add_argument(
@@ -669,7 +677,8 @@ def main():
 
     print("\n🔌 Initializing clients...")
     use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
-    cosmos_client = get_cosmos_client(use_rbac_auth=use_rbac_auth)
+    data_plane_credential = AsyncDefaultAzureCredential() if use_rbac_auth else None
+    cosmos_client = get_cosmos_client(use_rbac_auth=use_rbac_auth, credential=data_plane_credential)
 
     # Initialize embedding client (single endpoint/model)
     embed_client = get_embedding_client()
@@ -678,9 +687,9 @@ def main():
     database = cosmos_client.get_database_client(DATABASE_NAME)
     print(f"✓ Connected to database '{DATABASE_NAME}'")
 
-    def container_exists_data_plane(container_name: str) -> bool:
+    async def container_exists_data_plane_async(container_name: str) -> bool:
         try:
-            database.get_container_client(container_name).read()
+            await database.get_container_client(container_name).read()
             return True
         except exceptions.CosmosResourceNotFoundError:
             return False
@@ -688,13 +697,13 @@ def main():
     missing_policy_keys = [
         target["name"]
         for target in upload_targets
-        if not container_exists_data_plane(target["container_name"])
+        if not await container_exists_data_plane_async(target["container_name"])
     ]
 
     if missing_policy_keys:
         if AZURE_SUBSCRIPTION_ID and COSMOS_RESOURCE_GROUP:
             try:
-                credential = DefaultAzureCredential()
+                credential = SyncDefaultAzureCredential()
                 print("\n📦 Missing containers detected; attempting management-plane create...")
                 create_database_and_container_via_management(credential, missing_policy_keys)
             except Exception as e:
@@ -705,13 +714,18 @@ def main():
 
     upload_targets_ready = []
     for target in upload_targets:
-        if container_exists_data_plane(target["container_name"]):
+        if await container_exists_data_plane_async(target["container_name"]):
             upload_targets_ready.append(target)
         else:
             print(f"⚠ Skipping {target['name']} upload: container '{target['container_name']}' does not exist.")
 
     if not upload_targets_ready:
         print("No existing target containers available for upload. Nothing to do.")
+        if embed_client is not None:
+            await embed_client.close()
+        await cosmos_client.close()
+        if data_plane_credential is not None:
+            await data_plane_credential.close()
         return
 
     batch_size = EMBEDDING_BATCH_SIZE
@@ -738,7 +752,7 @@ def main():
         uploaded_containers.append(container_name)
         print(f"✓ Connected to container '{container_name}' for {target_name} upload")
         print(f"\n🔍 Scanning for files in ({target_name}): {documents_root}")
-        input_files = find_all_input_files(documents_root)
+        input_files = await asyncio.to_thread(find_all_input_files, documents_root)
         total_files_seen += len(input_files)
         print(f"✓ Found {len(input_files)} files")
 
@@ -752,7 +766,7 @@ def main():
 
         for file_path in tqdm(input_files, desc=f"Processing {target_name} files"):
             parse_start = time.perf_counter()
-            doc = load_json_document(file_path)
+            doc = await load_json_document(file_path)
             if doc is None:
                 failed_uploads += 1
                 total_parse_seconds += (time.perf_counter() - parse_start)
@@ -771,13 +785,13 @@ def main():
             if len(batch_docs) >= batch_size:
                 try:
                     embed_start = time.perf_counter()
-                    embeddings = generate_embeddings_batch(embed_client, batch_texts)
+                    embeddings = await generate_embeddings_batch(embed_client, batch_texts)
                     total_embed_seconds += (time.perf_counter() - embed_start)
                     for item_doc, embedding in zip(batch_docs, embeddings):
                         item_doc['e'] = embedding
 
                     upload_start = time.perf_counter()
-                    success_count, failed_count = upload_documents_batch(container, batch_docs)
+                    success_count, failed_count = await upload_documents_batch(container, batch_docs)
                     total_upload_seconds += (time.perf_counter() - upload_start)
                     successful_uploads += success_count
                     failed_uploads += failed_count
@@ -791,13 +805,13 @@ def main():
         if batch_docs:
             try:
                 embed_start = time.perf_counter()
-                embeddings = generate_embeddings_batch(embed_client, batch_texts)
+                embeddings = await generate_embeddings_batch(embed_client, batch_texts)
                 total_embed_seconds += (time.perf_counter() - embed_start)
                 for item_doc, embedding in zip(batch_docs, embeddings):
                     item_doc['e'] = embedding
 
                 upload_start = time.perf_counter()
-                success_count, failed_count = upload_documents_batch(container, batch_docs)
+                success_count, failed_count = await upload_documents_batch(container, batch_docs)
                 total_upload_seconds += (time.perf_counter() - upload_start)
                 successful_uploads += success_count
                 failed_uploads += failed_count
@@ -821,6 +835,12 @@ def main():
         print(f"⏱ Avg embed+upload per uploaded doc: {(total_embed_seconds + total_upload_seconds) / successful_uploads:.3f}s")
     print("=" * 60)
 
+    if embed_client is not None:
+        await embed_client.close()
+    await cosmos_client.close()
+    if data_plane_credential is not None:
+        await data_plane_credential.close()
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())

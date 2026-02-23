@@ -14,7 +14,7 @@ retrieval:
 # Pipeline parameters
 pipeline:
   max_sub_questions: 5
-  rounds: 2
+  rounds: 5
 
 # Execution parameters
 execution:
@@ -30,8 +30,8 @@ paths:
 llm:
   llm_endpoint: ""
   embed_endpoint: ""
-  api_version: "2025-04-01-preview"
-  llm_model: "gpt-5.2"
+  api_version: "2024-05-01-preview"
+  llm_model: "model-router"
   embed_model: ""
   embed_dimensions: 1024
   temperature: 0.0
