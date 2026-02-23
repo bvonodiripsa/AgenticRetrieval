@@ -4,9 +4,8 @@
 
 # Retrieval parameters
 retrieval:
+  # Legacy fallback for older config layout (ignored when cosmos.sources is used)
   k_fulltext: 10
-  k_structured: 5
-  k_unstructured: 65
   k_diverse: 80       # 0 = disabled; >0 = select this many diverse chunks via log-det
   eta: 0.0            # Gram matrix regularization
   rescale_power: 5.0  # Query-similarity rescale power
@@ -58,75 +57,13 @@ cosmos:
   uri: ""
   key: ""
   database_name: "divdet"
-  structured_container: "structured"
-  structured_partition_key_path: "/taxonomy"
-  unstructured_container: "unstructured"
-  unstructured_partition_key_path: "/url"
   use_rbac_auth: false
 
   # Upload settings used by cosmos_db_upload.py
   cosmos_account_name: ""
   cosmos_resource_group: ""
   azure_subscription_id: ""
-  structured_documents_root: ""
-  unstructured_documents_root: ""
   embedding_batch_size: 20
-
-  # Container policies used by cosmos_db_upload.py (kept as raw JSON for direct copy/paste)
-  indexing_policies_json:
-    structured: |
-      {
-        "indexingMode": "consistent",
-        "automatic": true,
-        "includedPaths": [
-          { "path": "/*" }
-        ],
-        "excludedPaths": [
-          { "path": "/\"_etag\"/?" },
-          { "path": "/e/*" }
-        ],
-        "fullTextIndexes": [
-          { "path": "/description" },
-          { "path": "/long_description" },
-          { "path": "/benefits" },
-          { "path": "/taxonomy" },
-          { "path": "/taxonomy_sap" },
-          { "path": "/designation" }
-        ],
-        "vectorIndexes": [
-          {
-            "path": "/e",
-            "type": "diskANN",
-            "quantizationByteSize": 192,
-            "indexingSearchListSize": 100
-          }
-        ]
-      }
-    unstructured: |
-      {
-        "indexingMode": "consistent",
-        "automatic": true,
-        "includedPaths": [
-          { "path": "/*" }
-        ],
-        "excludedPaths": [
-          { "path": "/\"_etag\"/?" },
-          { "path": "/e/*" }
-        ],
-        "fullTextIndexes": [
-          { "path": "/title" },
-          { "path": "/summary" },
-          { "path": "/content" }
-        ],
-        "vectorIndexes": [
-          {
-            "path": "/e",
-            "type": "diskANN",
-            "quantizationByteSize": 192,
-            "indexingSearchListSize": 100
-          }
-        ]
-      }
 
   vector_embedding_policy_json: |
     {
@@ -140,25 +77,89 @@ cosmos:
       ]
     }
 
-  full_text_policies_json:
-    structured: |
-      {
-        "defaultLanguage": "en-US",
-        "fullTextPaths": [
-          { "path": "/description", "language": "en-US" },
-          { "path": "/long_description", "language": "en-US" },
-          { "path": "/benefits", "language": "en-US" },
-          { "path": "/taxonomy", "language": "en-US" },
-          { "path": "/taxonomy_sap", "language": "en-US" },
-          { "path": "/designation", "language": "en-US" }
-        ]
-      }
-    unstructured: |
-      {
-        "defaultLanguage": "en-US",
-        "fullTextPaths": [
-          { "path": "/title", "language": "en-US" },
-          { "path": "/summary", "language": "en-US" },
-          { "path": "/content", "language": "en-US" }
-        ]
-      }
+  # Configure each source/container independently
+  sources:
+    - id: "source_1"
+      container_name: "container_1"
+      partition_key_path: "/pk"
+      documents_root: ""
+      embedding_text_fields:
+        - title
+        - summary
+        - content
+      retrieval:
+        vector_k: 10
+        fulltext_k: 10
+        fulltext_fields:
+          - title
+      indexing_policy_json: |
+        {
+          "indexingMode": "consistent",
+          "automatic": true,
+          "includedPaths": [
+            { "path": "/*" }
+          ],
+          "excludedPaths": [
+            { "path": "/\"_etag\"/?" },
+            { "path": "/e/*" }
+          ],
+          "fullTextIndexes": [
+            { "path": "/title" }
+          ],
+          "vectorIndexes": [
+            {
+              "path": "/e",
+              "type": "diskANN",
+              "quantizationByteSize": 192,
+              "indexingSearchListSize": 100
+            }
+          ]
+        }
+      full_text_policy_json: |
+        {
+          "defaultLanguage": "en-US",
+          "fullTextPaths": [
+            { "path": "/title", "language": "en-US" }
+          ]
+        }
+
+    - id: "source_2"
+      container_name: "container_2"
+      partition_key_path: "/pk"
+      documents_root: ""
+      embedding_text_fields:
+        - text
+      retrieval:
+        vector_k: 25
+        fulltext_k: 0
+        fulltext_fields: []
+      indexing_policy_json: |
+        {
+          "indexingMode": "consistent",
+          "automatic": true,
+          "includedPaths": [
+            { "path": "/*" }
+          ],
+          "excludedPaths": [
+            { "path": "/\"_etag\"/?" },
+            { "path": "/e/*" }
+          ],
+          "fullTextIndexes": [
+            { "path": "/text" }
+          ],
+          "vectorIndexes": [
+            {
+              "path": "/e",
+              "type": "diskANN",
+              "quantizationByteSize": 192,
+              "indexingSearchListSize": 100
+            }
+          ]
+        }
+      full_text_policy_json: |
+        {
+          "defaultLanguage": "en-US",
+          "fullTextPaths": [
+            { "path": "/text", "language": "en-US" }
+          ]
+        }

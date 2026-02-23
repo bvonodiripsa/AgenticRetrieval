@@ -728,16 +728,63 @@ class LLMClient:
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT", CONFIG["cosmos"]["uri"])
 COSMOS_KEY = os.getenv("COSMOS_KEY", CONFIG["cosmos"]["key"])
 DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", CONFIG["cosmos"]["database_name"])
-CONTAINER_STRUCTURED = os.getenv("COSMOS_STRUCTURED_CONTAINER_NAME", CONFIG["cosmos"]["structured_container"])
-CONTAINER_UNSTRUCTURED = os.getenv("COSMOS_UNSTRUCTURED_CONTAINER_NAME", CONFIG["cosmos"]["unstructured_container"])
-COSMOS_STRUCTURED_PARTITION_KEY_PATH = os.getenv(
-    "COSMOS_STRUCTURED_PARTITION_KEY_PATH",
-    CONFIG["cosmos"]["structured_partition_key_path"],
-)
-COSMOS_UNSTRUCTURED_PARTITION_KEY_PATH = os.getenv(
-    "COSMOS_UNSTRUCTURED_PARTITION_KEY_PATH",
-    CONFIG["cosmos"]["unstructured_partition_key_path"],
-)
+
+
+def _as_list_of_strings(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _legacy_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
+    retrieval_cfg = config.get("retrieval", {})
+    cosmos_cfg = config.get("cosmos", {})
+    k_fulltext_legacy = int(retrieval_cfg.get("k_fulltext", 0) or 0)
+    return [
+        {
+            "id": "structured",
+            "container_name": cosmos_cfg.get("structured_container"),
+            "partition_key_path": cosmos_cfg.get("structured_partition_key_path"),
+            "vector_k": int(retrieval_cfg.get("k_structured", 0) or 0),
+            "fulltext_k": k_fulltext_legacy,
+            "fulltext_fields": ["designation"],
+        },
+        {
+            "id": "unstructured",
+            "container_name": cosmos_cfg.get("unstructured_container"),
+            "partition_key_path": cosmos_cfg.get("unstructured_partition_key_path"),
+            "vector_k": int(retrieval_cfg.get("k_unstructured", 0) or 0),
+            "fulltext_k": 0,
+            "fulltext_fields": [],
+        },
+    ]
+
+
+def _build_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
+    cosmos_cfg = config.get("cosmos", {})
+    configured_sources = cosmos_cfg.get("sources")
+    if not isinstance(configured_sources, list) or not configured_sources:
+        return _legacy_retrieval_sources(config)
+
+    normalized_sources: list[dict[str, Any]] = []
+    for idx, source in enumerate(configured_sources, start=1):
+        source = source or {}
+        retrieval_cfg = source.get("retrieval") or {}
+        source_id = str(source.get("id") or f"source_{idx}").strip()
+        normalized_sources.append(
+            {
+                "id": source_id,
+                "container_name": source.get("container_name"),
+                "partition_key_path": source.get("partition_key_path"),
+                "vector_k": int(retrieval_cfg.get("vector_k", 0) or 0),
+                "fulltext_k": int(retrieval_cfg.get("fulltext_k", 0) or 0),
+                "fulltext_fields": _as_list_of_strings(retrieval_cfg.get("fulltext_fields")),
+            }
+        )
+    return normalized_sources
+
+
+RETRIEVAL_SOURCES = _build_retrieval_sources(CONFIG)
 
 # Comprehensive BM25 stopwords list
 STOPWORDS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "a's", "able", "about", "above", "according", "accordingly", "across", "actually", "after", "afterwards", "again", "against", "ain't", "all", "allow", "allows", "almost", "alone", "along", "already", "also", "although", "always", "am", "among", "amongst", "an", "and", "another", "any", "anybody", "anyhow", "anyone", "anything", "anyway", "anyways", "anywhere", "apart", "appear", "appreciate", "appropriate", "are", "aren't", "around", "as", "aside", "ask", "asking", "associated", "at", "available", "away", "awfully", "b", "be", "became", "because", "become", "becomes", "becoming", "been", "before", "beforehand", "behind", "being", "believe", "below", "beside", "besides", "best", "better", "between", "beyond", "both", "brief", "but", "by", "c", "c'mon", "c's", "came", "can", "can't", "cannot", "cant", "cause", "causes", "certain", "certainly", "changes", "clearly", "co", "com", "come", "comes", "concerning", "consequently", "consider", "considering", "contain", "containing", "contains", "corresponding", "could", "couldn't", "course", "currently", "d", "definitely", "described", "despite", "did", "didn't", "different", "do", "does", "doesn't", "doing", "don", "don't", "done", "down", "downwards", "during", "e", "each", "edu", "eg", "eight", "either", "else", "elsewhere", "enough", "entirely", "especially", "et", "etc", "even", "ever", "every", "everybody", "everyone", "everything", "everywhere", "ex", "exactly", "example", "except", "f", "far", "few", "fifth", "first", "five", "followed", "following", "follows", "for", "former", "formerly", "forth", "four", "from", "further", "furthermore", "g", "get", "gets", "getting", "given", "gives", "go", "goes", "going", "gone", "got", "gotten", "greetings", "h", "had", "hadn't", "happens", "hardly", "has", "hasn't", "have", "haven't", "having", "he", "he's", "hello", "help", "hence", "her", "here", "here's", "hereafter", "hereby", "herein", "hereupon", "hers", "herself", "hi", "him", "himself", "his", "hither", "hopefully", "how", "howbeit", "however", "i", "i'd", "i'll", "i'm", "i've", "ie", "if", "ignored", "immediate", "in", "inasmuch", "inc", "indeed", "indicate", "indicated", "indicates", "inner", "insofar", "instead", "into", "inward", "is", "isn't", "it", "it'd", "it'll", "it's", "its", "itself", "j", "just", "k", "keep", "keeps", "kept", "know", "known", "knows", "l", "last", "lately", "later", "latter", "latterly", "least", "less", "lest", "let", "let's", "like", "liked", "likely", "little", "ll", "look", "looking", "looks", "ltd", "m", "mainly", "make", "many", "may", "maybe", "me", "mean", "meanwhile", "merely", "might", "more", "moreover", "most", "mostly", "mr", "mrs", "ms", "much", "must", "my", "myself", "n", "name", "namely", "nd", "near", "nearly", "necessary", "need", "needs", "neither", "never", "nevertheless", "new", "next", "nine", "no", "nobody", "non", "none", "noone", "nor", "normally", "not", "nothing", "novel", "now", "nowhere", "o", "obviously", "of", "off", "often", "oh", "ok", "okay", "old", "on", "once", "one", "ones", "only", "onto", "or", "other", "others", "otherwise", "ought", "our", "ours", "ourselves", "out", "outside", "over", "overall", "own", "p", "particular", "particularly", "per", "perhaps", "placed", "please", "plus", "possible", "presumably", "probably", "provides", "q", "que", "quite", "qv", "r", "rather", "rd", "re", "really", "reasonably", "regarding", "regardless", "regards", "relatively", "respectively", "right", "s", "said", "same", "saw", "say", "saying", "says", "second", "secondly", "see", "seeing", "seem", "seemed", "seeming", "seems", "seen", "self", "selves", "sensible", "sent", "serious", "seriously", "seven", "several", "shall", "she", "should", "shouldn't", "since", "six", "so", "some", "somebody", "somehow", "someone", "something", "sometime", "sometimes", "somewhat", "somewhere", "soon", "sorry", "specified", "specify", "specifying", "still", "sub", "such", "sup", "sure", "t", "t's", "take", "taken", "tell", "tends", "th", "than", "thank", "thanks", "thanx", "that", "that's", "thats", "the", "their", "theirs", "them", "themselves", "then", "thence", "there", "there's", "thereafter", "thereby", "therefore", "therein", "theres", "thereupon", "these", "they", "they'd", "they'll", "they're", "they've", "think", "third", "this", "thorough", "thoroughly", "those", "though", "three", "through", "throughout", "thru", "thus", "to", "together", "too", "took", "toward", "towards", "tried", "tries", "truly", "try", "trying", "twice", "two", "u", "un", "under", "unfortunately", "unless", "unlikely", "until", "unto", "up", "upon", "us", "use", "used", "useful", "uses", "using", "usually", "v", "value", "various", "ve", "very", "via", "viz", "vs", "w", "want", "wants", "was", "wasn't", "way", "we", "we'd", "we'll", "we're", "we've", "welcome", "well", "went", "were", "weren't", "what", "what's", "whatever", "when", "whence", "whenever", "where", "where's", "whereafter", "whereas", "whereby", "wherein", "whereupon", "wherever", "whether", "which", "while", "whither", "who", "who's", "whoever", "whole", "whom", "whose", "why", "will", "willing", "wish", "with", "within", "without", "won't", "wonder", "would", "wouldn't", "x", "y", "yes", "yet", "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves", "z", "zero"}
@@ -772,31 +819,73 @@ def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
 
 
 class CombinedRetriever:
-    def __init__(self, k_fulltext: int, k_structured: int, k_unstructured: int,
-                 k_diverse: int = 0, eta: float = 0.0, rescale_power: float = 0.0):
-        self.k_fulltext = k_fulltext
-        self.k_structured = k_structured
-        self.k_unstructured = k_unstructured
+    def __init__(
+        self,
+        retrieval_sources: list[dict[str, Any]],
+        fulltext_k_override: int | None = None,
+        k_diverse: int = 0,
+        eta: float = 0.0,
+        rescale_power: float = 0.0,
+    ):
         self.k_diverse = k_diverse
         self.eta = eta
         self.rescale_power = rescale_power
         self._cosmos = None
         self._db = None
-        self._structured = None
-        self._unstructured = None
+        self._containers: dict[str, Any] = {}
         self._llm = None
         self._expected_vector_dim = int(CONFIG.get("llm", {}).get("embed_dimensions") or 0)
-        self._structured_partition_key_path = str(COSMOS_STRUCTURED_PARTITION_KEY_PATH or "").strip()
-        self._unstructured_partition_key_path = str(COSMOS_UNSTRUCTURED_PARTITION_KEY_PATH or "").strip()
         self._credential = None
         self._retrieve_cache = LRUCache(int(CONFIG.get("retrieval", {}).get("cache_size", 2000)))
+        self._sources = self._normalize_sources(retrieval_sources, fulltext_k_override)
 
-    def _partition_key_expr(self, partition_key_path: str) -> str:
-        segments = [s for s in partition_key_path.split("/") if s]
-        if not segments:
-            raise ValueError("Cosmos partition key path is not configured")
-        return "c." + ".".join(segments)
-    
+    @property
+    def total_fulltext_k(self) -> int:
+        return sum(int(source.get("fulltext_k", 0) or 0) for source in self._sources)
+
+    @property
+    def total_vector_k(self) -> int:
+        return sum(int(source.get("vector_k", 0) or 0) for source in self._sources)
+
+    @property
+    def source_count(self) -> int:
+        return len(self._sources)
+
+    @staticmethod
+    def _is_safe_field_path(path: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*", path))
+
+    def _normalize_sources(
+        self,
+        retrieval_sources: list[dict[str, Any]],
+        fulltext_k_override: int | None,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for idx, source in enumerate(retrieval_sources, start=1):
+            source = source or {}
+            source_id = str(source.get("id") or f"source_{idx}").strip()
+            container_name = str(source.get("container_name") or "").strip()
+            if not container_name:
+                continue
+            vector_k = int(source.get("vector_k", 0) or 0)
+            fulltext_k = int(source.get("fulltext_k", 0) or 0)
+            if fulltext_k_override is not None:
+                fulltext_k = int(fulltext_k_override)
+            fulltext_fields = [
+                field for field in _as_list_of_strings(source.get("fulltext_fields")) if self._is_safe_field_path(field)
+            ]
+            normalized.append(
+                {
+                    "id": source_id,
+                    "container_name": container_name,
+                    "partition_key_path": str(source.get("partition_key_path") or "").strip(),
+                    "vector_k": max(0, vector_k),
+                    "fulltext_k": max(0, fulltext_k),
+                    "fulltext_fields": fulltext_fields,
+                }
+            )
+        return normalized
+
     async def initialize(self):
         use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
         if use_rbac_auth:
@@ -809,52 +898,53 @@ class CombinedRetriever:
                 raise ValueError("Cosmos DB key not configured. Set cosmos.key in config.yaml.")
             print("✓ Using key-based authentication for Cosmos DB")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=COSMOS_KEY, connection_mode="Direct")
+
         self._db = self._cosmos.get_database_client(DATABASE_NAME)
-        self._structured = self._db.get_container_client(CONTAINER_STRUCTURED)
-        self._unstructured = self._db.get_container_client(CONTAINER_UNSTRUCTURED)
+        for source in self._sources:
+            self._containers[source["id"]] = self._db.get_container_client(source["container_name"])
         self._llm = LLMClient()
-    
-    async def _fulltext_search(self, query: str, top_k: int) -> list[dict]:
-        if self._structured is None:
-            raise RuntimeError("Retriever is not initialized")
-        if top_k <= 0:
+
+    async def _fulltext_search(self, container, fields: list[str], query: str, top_k: int) -> list[dict]:
+        if top_k <= 0 or not fields:
             return []
-        terms = [t for t in re.findall(r'\w+', query) if t.lower() not in STOPWORDS and len(t) > 1]
+        terms = [t for t in re.findall(r"\w+", query) if t.lower() not in STOPWORDS and len(t) > 1]
         if not terms:
             return []
-        
-        # Chunk terms (max 5 per FullTextScore)
-        chunks = [terms[i:i+5] for i in range(0, len(terms), 5)]
-        if len(chunks) == 1:
-            args = ', '.join(f'"{t}"' for t in chunks[0])
-            order = f"ORDER BY RANK FullTextScore(c.designation, {args})"
+
+        chunks = [terms[i:i + 5] for i in range(0, len(terms), 5)]
+        score_exprs: list[str] = []
+        for field in fields:
+            field_expr = f"c.{field}"
+            for term_chunk in chunks:
+                args = ", ".join(f'"{term}"' for term in term_chunk)
+                score_exprs.append(f"FullTextScore({field_expr}, {args})")
+        if not score_exprs:
+            return []
+
+        if len(score_exprs) == 1:
+            order = f"ORDER BY RANK {score_exprs[0]}"
         else:
-            scores = [f"FullTextScore(c.designation, {', '.join(f'\"{t}\"' for t in c)})" for c in chunks]
-            order = f"ORDER BY RANK RRF({', '.join(scores)})"
-        
+            order = f"ORDER BY RANK RRF({', '.join(score_exprs)})"
+
         try:
             sql = f"SELECT TOP {top_k} * FROM c {order}"
             if _TIMING:
                 with _print_lock:
-                    print(f"  [QUERY] fulltext SQL: {sql}")
+                    print(f"  [QUERY] fulltext SQL ({container.id}): {sql}")
 
-            t = _ck(f"fulltext query (top {top_k}) – start")
-
-            query_iterator = self._structured.query_items(
-                query=sql,
-                parameters=[]
-            )
+            t = _ck(f"fulltext query (top {top_k}, {container.id}) – start")
+            query_iterator = container.query_items(query=sql, parameters=[])
             items = []
             async for item in query_iterator:
                 items.append(item)
 
-            _ck(f"fulltext query – done ({len(items)} results)", t)
+            _ck(f"fulltext query – done ({len(items)} results, {container.id})", t)
             return items
         except Exception as e:
-            print(f"Fulltext error: {e}")
+            print(f"Fulltext error ({container.id}): {e}")
             return []
-    
-    async def _vector_search(self, container, partition_key_path: str, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
+
+    async def _vector_search(self, container, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
         if top_k <= 0:
             return []
         adjusted_emb = [float(x) for x in query_emb]
@@ -927,7 +1017,7 @@ class CombinedRetriever:
         )
     
     async def retrieve(self, query: str) -> list[RetrievedChunk]:
-        if self._llm is None or self._structured is None or self._unstructured is None:
+        if self._llm is None:
             raise RuntimeError("Retriever is not initialized")
         t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
 
@@ -936,46 +1026,67 @@ class CombinedRetriever:
             _ck("retrieve – cache hit", t_retrieve)
             return copy.deepcopy(cached)
 
-        chunks, seen = [], set()
+        chunks: list[RetrievedChunk] = []
+        seen: set[tuple[str, Any]] = set()
 
-        t = _ck("  retrieve: fulltext – start (parallel)")
-        ft_task = asyncio.create_task(self._fulltext_search(query, self.k_fulltext))
+        fulltext_tasks: list[tuple[dict[str, Any], asyncio.Task]] = []
+        for source in self._sources:
+            container = self._containers.get(source["id"])
+            if container is None:
+                continue
+            top_k = int(source.get("fulltext_k", 0) or 0)
+            fields = source.get("fulltext_fields") or []
+            if top_k <= 0 or not fields:
+                continue
+            t_fulltext = _ck(f"  retrieve: fulltext/{source['id']} – start (parallel)")
+            task = asyncio.create_task(self._fulltext_search(container, fields, query, top_k))
+            fulltext_tasks.append(({"source": source, "timer": t_fulltext}, task))
 
-        t_emb = _ck("  retrieve: embed query – start")
-        emb = await self._llm.embed(query)
-        _ck("  retrieve: embed query – done", t_emb)
+        emb: list[float] | None = None
+        vector_sources = [source for source in self._sources if int(source.get("vector_k", 0) or 0) > 0]
+        if vector_sources:
+            t_emb = _ck("  retrieve: embed query – start")
+            emb = await self._llm.embed(query)
+            _ck("  retrieve: embed query – done", t_emb)
 
-        t_str = _ck("  retrieve: structured vector – start (parallel)")
-        t_uns = _ck("  retrieve: unstructured vector – start (parallel)")
-        str_task = asyncio.create_task(
-            self._vector_search(
-                self._structured, self._structured_partition_key_path, emb, self.k_structured, query
-            )
-        )
-        uns_task = asyncio.create_task(
-            self._vector_search(
-                self._unstructured, self._unstructured_partition_key_path, emb, self.k_unstructured, query
-            )
-        )
+        vector_tasks: list[tuple[dict[str, Any], asyncio.Task]] = []
+        if emb is not None:
+            for source in vector_sources:
+                container = self._containers.get(source["id"])
+                if container is None:
+                    continue
+                t_vector = _ck(f"  retrieve: vector/{source['id']} – start (parallel)")
+                task = asyncio.create_task(
+                    self._vector_search(
+                        container,
+                        emb,
+                        int(source.get("vector_k", 0) or 0),
+                        query,
+                    )
+                )
+                vector_tasks.append(({"source": source, "timer": t_vector}, task))
 
-        ft_docs, str_docs, uns_docs = await asyncio.gather(ft_task, str_task, uns_task)
-        _ck(f"  retrieve: fulltext – done ({len(ft_docs)} results)", t)
-        _ck(f"  retrieve: structured vector – done ({len(str_docs)} results)", t_str)
-        _ck(f"  retrieve: unstructured vector – done ({len(uns_docs)} results)", t_uns)
+        for info, task in fulltext_tasks:
+            source = info["source"]
+            docs = await task
+            _ck(f"  retrieve: fulltext/{source['id']} – done ({len(docs)} results)", info["timer"])
+            for doc in docs:
+                dedupe_key = (source["id"], doc.get("id"))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                chunks.append(self._format_doc(doc, f"{source['id']}_fulltext"))
 
-        # Merge: fulltext first, then structured, then unstructured (preserves priority order)
-        for doc in ft_docs:
-            if doc.get('id') not in seen:
-                seen.add(doc['id'])
-                chunks.append(self._format_doc(doc, 'fulltext'))
-        for doc in str_docs:
-            if doc.get('id') not in seen:
-                seen.add(doc['id'])
-                chunks.append(self._format_doc(doc, 'structured_vector'))
-        for doc in uns_docs:
-            if doc.get('id') not in seen:
-                seen.add(doc['id'])
-                chunks.append(self._format_doc(doc, 'unstructured_vector'))
+        for info, task in vector_tasks:
+            source = info["source"]
+            docs = await task
+            _ck(f"  retrieve: vector/{source['id']} – done ({len(docs)} results)", info["timer"])
+            for doc in docs:
+                dedupe_key = (source["id"], doc.get("id"))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                chunks.append(self._format_doc(doc, f"{source['id']}_vector"))
         
         # Diversity selection via greedy log-det maximization
         if self.k_diverse > 0 and len(chunks) > self.k_diverse:
@@ -989,6 +1100,8 @@ class CombinedRetriever:
             _ck(f"  retrieve: diversity embed missing – done ({n_missing} embeds)", t)
             t = _ck("  retrieve: greedy log-det – start")
             vectors = np.array([c.metadata['embedding'] for c in chunks], dtype=np.float32)
+            if emb is None:
+                emb = await self._llm.embed(query)
             query_vec = np.array(emb, dtype=np.float32)
             selected = greedy_log_det_select(vectors, query_vec, self.k_diverse, self.eta, self.rescale_power)
             chunks = [chunks[i] for i in selected]
@@ -1158,9 +1271,12 @@ async def main_async():
     parser = argparse.ArgumentParser()
     pipeline_cfg = CONFIG.get("pipeline", {})
     parser.add_argument("--config", type=Path, default=None, help="Override config yaml path")
-    parser.add_argument("--k-fulltext", type=int, default=CONFIG["retrieval"]["k_fulltext"])
-    parser.add_argument("--k-structured", type=int, default=CONFIG["retrieval"]["k_structured"])
-    parser.add_argument("--k-unstructured", type=int, default=CONFIG["retrieval"]["k_unstructured"])
+    parser.add_argument(
+        "--k-fulltext",
+        type=int,
+        default=None,
+        help="Optional override for fulltext_k across all configured sources",
+    )
     parser.add_argument("--k-diverse", type=int, default=CONFIG["retrieval"]["k_diverse"], help="Diverse chunks to select via log-det (0=disabled)")
     parser.add_argument("--eta", type=float, default=CONFIG["retrieval"]["eta"], help="Gram matrix regularization")
     parser.add_argument("--rescale-power", type=float, default=CONFIG["retrieval"]["rescale_power"], help="Query-similarity rescale power")
@@ -1178,15 +1294,25 @@ async def main_async():
     global _TIMING, _t0
     _TIMING = args.timing
     _t0 = time.perf_counter()
-    
-    total_k = args.k_fulltext + args.k_structured + args.k_unstructured
-    print(f"Decomposed RAG: fulltext={args.k_fulltext}, structured={args.k_structured}, unstructured={args.k_unstructured}, diverse={args.k_diverse}")
+
+    retriever = CombinedRetriever(
+        retrieval_sources=RETRIEVAL_SOURCES,
+        fulltext_k_override=args.k_fulltext,
+        k_diverse=args.k_diverse,
+        eta=args.eta,
+        rescale_power=args.rescale_power,
+    )
+    total_fulltext_k = retriever.total_fulltext_k
+    total_vector_k = retriever.total_vector_k
+    total_k = total_fulltext_k + total_vector_k
+    print(
+        f"Decomposed RAG: sources={retriever.source_count}, "
+        f"fulltext_total={total_fulltext_k}, vector_total={total_vector_k}, diverse={args.k_diverse}"
+    )
     if _TIMING:
         print("[TIMING enabled] All checkpoints printed as +<step_elapsed>s (total <from_start>s)")
 
     t = _ck("retriever.initialize – start")
-    retriever = CombinedRetriever(args.k_fulltext, args.k_structured, args.k_unstructured,
-                                  args.k_diverse, args.eta, args.rescale_power)
     await retriever.initialize()
     _ck("retriever.initialize – done", t)
     llm = LLMClient()
@@ -1205,7 +1331,7 @@ async def main_async():
     print(f"Processing {len(questions)} questions")
     
     div_suffix = f"_div{args.k_diverse}" if args.k_diverse > 0 else ""
-    output_path = args.output_root / f"k{total_k}_ft{args.k_fulltext}_str{args.k_structured}_uns{args.k_unstructured}{div_suffix}"
+    output_path = args.output_root / f"k{total_k}_ft{total_fulltext_k}_vec{total_vector_k}{div_suffix}"
     output_path.mkdir(parents=True, exist_ok=True)
     
     results = []

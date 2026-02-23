@@ -4,8 +4,8 @@ Cosmos DB Document Upload Script with OpenAI Embeddings
 This script:
 1. Automatically ensures missing Cosmos DB containers for enabled upload targets when
     management settings are available; otherwise skips missing targets.
-2. Determines upload targets from config by presence of:
-    `cosmos.structured_documents_root` and `cosmos.unstructured_documents_root`.
+2. Determines upload targets from `cosmos.sources` in config (legacy structured/unstructured
+    keys are still supported for backward compatibility).
 3. Supports optional `--folder` override to use one input folder for all enabled targets.
 4. Scans all files in each enabled folder (content is assumed JSON), parses documents, and
     generates embeddings from the configured `llm.embed_endpoint` / `llm.embed_model`.
@@ -63,10 +63,6 @@ with open(_CONFIG_PATH) as _f:
 COSMOS_ENDPOINT = CONFIG["cosmos"]["uri"]
 COSMOS_KEY = CONFIG["cosmos"]["key"]
 DATABASE_NAME = CONFIG["cosmos"]["database_name"]
-STRUCTURED_CONTAINER_NAME = CONFIG["cosmos"]["structured_container"]
-UNSTRUCTURED_CONTAINER_NAME = CONFIG["cosmos"]["unstructured_container"]
-STRUCTURED_PARTITION_KEY_PATH = CONFIG["cosmos"]["structured_partition_key_path"]
-UNSTRUCTURED_PARTITION_KEY_PATH = CONFIG["cosmos"]["unstructured_partition_key_path"]
 
 # Azure Resource Manager configuration (extracted from endpoint)
 # e.g., https://skf-rag-test.documents.azure.com:443/ -> account name is skf-rag-test
@@ -84,22 +80,102 @@ AZURE_OPENAI_KEY = CONFIG["llm"]["azure_openai_key"]
 # Batch configuration
 EMBEDDING_BATCH_SIZE = int(CONFIG["cosmos"]["embedding_batch_size"])  # Number of texts to embed in one API call
 
-
-
-# Path to JSON documents
-UNSTRUCTURED_DOCUMENTS_ROOT = CONFIG["cosmos"]["unstructured_documents_root"]
-STRUCTURED_DOCUMENTS_ROOT = CONFIG["cosmos"]["structured_documents_root"]
-
-# ============== INDEXING POLICY (CONFIG-DRIVEN) ==============
-INDEXING_POLICIES = {
-    "structured": json.loads(CONFIG["cosmos"]["indexing_policies_json"]["structured"]),
-    "unstructured": json.loads(CONFIG["cosmos"]["indexing_policies_json"]["unstructured"]),
-}
-FULL_TEXT_POLICIES = {
-    "structured": json.loads(CONFIG["cosmos"]["full_text_policies_json"]["structured"]),
-    "unstructured": json.loads(CONFIG["cosmos"]["full_text_policies_json"]["unstructured"]),
-}
 VECTOR_EMBEDDING_POLICY = json.loads(CONFIG["cosmos"]["vector_embedding_policy_json"])
+
+
+def _has_value(value: Any) -> bool:
+    return bool(value and str(value).strip())
+
+
+def _as_list_of_strings(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _safe_load_json_policy(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        return json.loads(raw)
+    return None
+
+
+def _legacy_source_configs(cosmos_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+
+    legacy_specs = [
+        {
+            "id": "structured",
+            "container_name": cosmos_cfg.get("structured_container"),
+            "partition_key_path": cosmos_cfg.get("structured_partition_key_path"),
+            "documents_root": cosmos_cfg.get("structured_documents_root"),
+            "embedding_text_fields": [
+                "title",
+                "summary",
+                "content",
+                "designation",
+                "description",
+                "long_description",
+                "benefits",
+                "tags",
+                "taxonomy",
+            ],
+            "indexing_policy": _safe_load_json_policy(
+                cosmos_cfg.get("indexing_policies_json", {}).get("structured")
+            ),
+            "full_text_policy": _safe_load_json_policy(
+                cosmos_cfg.get("full_text_policies_json", {}).get("structured")
+            ),
+        },
+        {
+            "id": "unstructured",
+            "container_name": cosmos_cfg.get("unstructured_container"),
+            "partition_key_path": cosmos_cfg.get("unstructured_partition_key_path"),
+            "documents_root": cosmos_cfg.get("unstructured_documents_root"),
+            "embedding_text_fields": ["title", "summary", "content"],
+            "indexing_policy": _safe_load_json_policy(
+                cosmos_cfg.get("indexing_policies_json", {}).get("unstructured")
+            ),
+            "full_text_policy": _safe_load_json_policy(
+                cosmos_cfg.get("full_text_policies_json", {}).get("unstructured")
+            ),
+        },
+    ]
+
+    for spec in legacy_specs:
+        if _has_value(spec["container_name"]):
+            sources.append(spec)
+
+    return sources
+
+
+def build_source_configs() -> list[dict[str, Any]]:
+    cosmos_cfg = CONFIG.get("cosmos", {})
+    configured_sources = cosmos_cfg.get("sources")
+    normalized_sources: list[dict[str, Any]] = []
+
+    if isinstance(configured_sources, list) and configured_sources:
+        for idx, source in enumerate(configured_sources, start=1):
+            source = source or {}
+            source_id = str(source.get("id") or f"source_{idx}").strip()
+            normalized_sources.append(
+                {
+                    "id": source_id,
+                    "container_name": source.get("container_name"),
+                    "partition_key_path": source.get("partition_key_path"),
+                    "documents_root": source.get("documents_root"),
+                    "embedding_text_fields": _as_list_of_strings(source.get("embedding_text_fields")),
+                    "indexing_policy": _safe_load_json_policy(source.get("indexing_policy_json")),
+                    "full_text_policy": _safe_load_json_policy(source.get("full_text_policy_json")),
+                }
+            )
+        return normalized_sources
+
+    return _legacy_source_configs(cosmos_cfg)
+
+
+SOURCE_CONFIGS = build_source_configs()
 
 
 def _normalize_embedding(embedding: List[float]) -> List[float]:
@@ -205,7 +281,7 @@ def enable_vector_search_capability(credential, subscription_id: str, resource_g
         print("  ✓ Vector Search and Full Text Search capabilities already enabled")
 
 
-def create_database_and_container_via_management(credential, enabled_policy_keys: List[str]):
+def create_database_and_container_via_management(credential, source_specs: List[dict[str, Any]]):
     """
     Create database and configured containers using Azure Resource Manager (control plane).
     Existing containers are never updated here; only missing containers are created.
@@ -268,26 +344,23 @@ def create_database_and_container_via_management(credential, enabled_policy_keys
                 return False
             raise
 
-    container_name_by_policy_key = {
-        "structured": STRUCTURED_CONTAINER_NAME,
-        "unstructured": UNSTRUCTURED_CONTAINER_NAME,
-    }
-    partition_key_path_by_policy_key = {
-        "structured": STRUCTURED_PARTITION_KEY_PATH,
-        "unstructured": UNSTRUCTURED_PARTITION_KEY_PATH,
-    }
     container_specs = [
-        (policy_key, container_name_by_policy_key[policy_key])
-        for policy_key in enabled_policy_keys
-        if policy_key in container_name_by_policy_key
+        (
+            source.get("id", "unknown"),
+            source.get("container_name"),
+            source.get("partition_key_path"),
+            source.get("indexing_policy"),
+            source.get("full_text_policy"),
+        )
+        for source in source_specs
     ]
     processed_names = set()
     max_retries = 5
     retry_delay = 30  # seconds
 
-    for policy_key, container_name in container_specs:
+    for source_id, container_name, partition_key_path, index_policy_cfg, fts_policy_cfg in container_specs:
         if not container_name or not str(container_name).strip():
-            print(f"  ⚠ Skipping {policy_key}: container name is not configured")
+            print(f"  ⚠ Skipping {source_id}: container name is not configured")
             continue
         if container_name in processed_names:
             continue
@@ -297,13 +370,16 @@ def create_database_and_container_via_management(credential, enabled_policy_keys
             print(f"  ✓ Container '{container_name}' already exists - skipping")
             continue
 
-        partition_key_path = partition_key_path_by_policy_key[policy_key]
         if not partition_key_path or not str(partition_key_path).strip():
-            print(f"  ⚠ Skipping {policy_key}: partition key path is not configured")
+            print(f"  ⚠ Skipping {source_id}: partition key path is not configured")
             continue
 
-        fts_policy_cfg = FULL_TEXT_POLICIES[policy_key]
-        index_policy_cfg = INDEXING_POLICIES[policy_key]
+        if not index_policy_cfg:
+            print(f"  ⚠ Skipping {source_id}: indexing policy is not configured")
+            continue
+        if not fts_policy_cfg:
+            print(f"  ⚠ Skipping {source_id}: full-text policy is not configured")
+            continue
 
         indexing_policy = IndexingPolicy(
             indexing_mode=index_policy_cfg["indexingMode"],
@@ -399,78 +475,25 @@ def create_database_and_container_via_management(credential, enabled_policy_keys
                 print(f"  Error creating container '{container_name}': {e}")
                 raise
 
-def generate_embedding_text_structured(doc: Dict[str, Any]) -> str:
-    """
-    Generate the text to be embedded from a document.
-    Combines all relevant text fields into a single string.
-    """
-    text_parts = []
-    
-    # Add title if present
-    if "title" in doc and doc["title"]:
-        text_parts.append(f"Title: {doc['title']}")
-    
-    # Add summary if present
-    if "summary" in doc and doc["summary"]:
-        text_parts.append(f"Summary: {doc['summary']}")
-    
-    # Add content if present
-    if "content" in doc and doc["content"]:
-        text_parts.append(f"Content: {doc['content']}")
-        
-    # Add designation if present
-    if "designation" in doc and doc["designation"]:
-        text_parts.append(f"Designation: {doc['designation']}")
-    
-    # Add description if present
-    if "description" in doc and doc["description"]:
-        text_parts.append(f"Description: {doc['description']}")
-    
-    # Add long_description if present
-    if "long_description" in doc and doc["long_description"]:
-        text_parts.append(f"Long Description: {doc['long_description']}")
-    
-    # Add benefits if present
-    if "benefits" in doc and doc["benefits"]:
-        benefits = doc["benefits"]
-        if isinstance(benefits, list):
-            text_parts.append(f"Benefits: {', '.join(benefits)}")
-        else:
-            text_parts.append(f"Benefits: {benefits}")
-    
-    # Add tags if present
-    if "tags" in doc and doc["tags"]:
-        tags = doc["tags"]
-        if isinstance(tags, list):
-            text_parts.append(f"Tags: {', '.join(tags)}")
-        else:
-            text_parts.append(f"Tags: {tags}")
-    
-    # Add taxonomy if present
-    if "taxonomy" in doc and doc["taxonomy"]:
-        text_parts.append(f"Taxonomy: {doc['taxonomy']}")
+def generate_embedding_text(doc: Dict[str, Any], text_fields: list[str]) -> str:
+    """Build embedding text from configured fields; fallback to full JSON when empty."""
+    text_parts: list[str] = []
 
-    
-    # If no specific fields found, use the entire JSON
+    for field_name in text_fields:
+        value = doc.get(field_name)
+        if value is None or value == "":
+            continue
+        label = field_name.replace("_", " ").title()
+        if isinstance(value, list):
+            text_parts.append(f"{label}: {', '.join(str(v) for v in value)}")
+        elif isinstance(value, dict):
+            text_parts.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+        else:
+            text_parts.append(f"{label}: {value}")
+
     if not text_parts:
         text_parts.append(json.dumps(doc, ensure_ascii=False))
-    
-    return "\n".join(text_parts)
 
-def generate_embedding_text_unstructured(doc: Dict[str, Any]) -> str:
-    """
-    Generate the text to be embedded from a document.
-    Combines all relevant text fields into a single string.
-    """
-    text_parts = []
-    
-    # Add title, summary, and content if present
-    if "title" in doc and doc["title"]:
-        text_parts.append(f"Title: {doc['title']}")
-    if "summary" in doc and doc["summary"]:
-        text_parts.append(f"Summary: {doc['summary']}")
-    if "content" in doc and doc["content"]:
-        text_parts.append(f"Content: {doc['content']}")
     return "\n".join(text_parts)
 
 
@@ -638,31 +661,32 @@ async def main_async():
     print(f"✓ Embedding model: {EMBED_MODEL}")
     print(f"✓ Embedding dimensions: {EMBEDDING_DIMENSIONS}")
 
-    def has_value(value: Any) -> bool:
-        return bool(value and str(value).strip())
-
     upload_targets = []
-    if has_value(STRUCTURED_DOCUMENTS_ROOT):
-        upload_targets.append({
-            "name": "structured",
-            "documents_root": STRUCTURED_DOCUMENTS_ROOT,
-            "container_name": STRUCTURED_CONTAINER_NAME,
-            "partition_key_path": STRUCTURED_PARTITION_KEY_PATH,
-            "text_builder": generate_embedding_text_structured,
-        })
-    else:
-        print("⚠ Skipping structured upload: cosmos.structured_documents_root is empty or not set.")
-
-    if has_value(UNSTRUCTURED_DOCUMENTS_ROOT):
-        upload_targets.append({
-            "name": "unstructured",
-            "documents_root": UNSTRUCTURED_DOCUMENTS_ROOT,
-            "container_name": UNSTRUCTURED_CONTAINER_NAME,
-            "partition_key_path": UNSTRUCTURED_PARTITION_KEY_PATH,
-            "text_builder": generate_embedding_text_unstructured,
-        })
-    else:
-        print("⚠ Skipping unstructured upload: cosmos.unstructured_documents_root is empty or not set.")
+    for source in SOURCE_CONFIGS:
+        source_name = source.get("id", "unknown")
+        container_name = source.get("container_name")
+        partition_key_path = source.get("partition_key_path")
+        documents_root = source.get("documents_root")
+        if not _has_value(container_name):
+            print(f"⚠ Skipping {source_name} upload: container_name is empty or not set.")
+            continue
+        if not _has_value(partition_key_path):
+            print(f"⚠ Skipping {source_name} upload: partition_key_path is empty or not set.")
+            continue
+        if not _has_value(documents_root):
+            print(f"⚠ Skipping {source_name} upload: documents_root is empty or not set.")
+            continue
+        upload_targets.append(
+            {
+                "name": source_name,
+                "documents_root": documents_root,
+                "container_name": container_name,
+                "partition_key_path": partition_key_path,
+                "embedding_text_fields": source.get("embedding_text_fields") or [],
+                "indexing_policy": source.get("indexing_policy"),
+                "full_text_policy": source.get("full_text_policy"),
+            }
+        )
 
     if not upload_targets:
         print("No upload targets configured. Nothing to upload.")
@@ -694,18 +718,18 @@ async def main_async():
         except exceptions.CosmosResourceNotFoundError:
             return False
 
-    missing_policy_keys = [
-        target["name"]
+    missing_target_specs = [
+        target
         for target in upload_targets
         if not await container_exists_data_plane_async(target["container_name"])
     ]
 
-    if missing_policy_keys:
+    if missing_target_specs:
         if AZURE_SUBSCRIPTION_ID and COSMOS_RESOURCE_GROUP:
             try:
                 credential = SyncDefaultAzureCredential()
                 print("\n📦 Missing containers detected; attempting management-plane create...")
-                create_database_and_container_via_management(credential, missing_policy_keys)
+                create_database_and_container_via_management(credential, missing_target_specs)
             except Exception as e:
                 print(f"⚠ Container auto-create failed: {e}")
         else:
@@ -741,8 +765,7 @@ async def main_async():
         target_name = target["name"]
         documents_root = target["documents_root"]
         container_name = target["container_name"]
-        partition_key_path = str(target["partition_key_path"])
-        build_embedding_text = target["text_builder"]
+        text_fields = target["embedding_text_fields"]
 
         if not os.path.isdir(documents_root):
             print(f"⚠ Skipping {target_name} upload: folder does not exist: {documents_root}")
@@ -777,7 +800,7 @@ async def main_async():
 
             doc = replace_document_id(doc, relative_path)
 
-            embedding_text = build_embedding_text(doc)
+            embedding_text = generate_embedding_text(doc, text_fields)
             batch_docs.append(doc)
             batch_texts.append(embedding_text)
             total_parse_seconds += (time.perf_counter() - parse_start)
