@@ -3,11 +3,13 @@
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
 import time
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -88,6 +90,25 @@ def _multi_activity_reason(response_meta: list[dict[str, str]]) -> str:
         reasons.append("multiple backend executions (possible retries or internal query pipeline calls)")
 
     return f" [Reason: {'; '.join(reasons)}]"
+
+
+class LRUCache:
+    def __init__(self, max_size: int):
+        self.max_size = max(1, int(max_size))
+        self._data: OrderedDict[str, Any] = OrderedDict()
+
+    def get(self, key: str) -> Any | None:
+        value = self._data.get(key)
+        if value is None:
+            return None
+        self._data.move_to_end(key)
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self.max_size:
+            self._data.popitem(last=False)
 
 
 # Load config from yaml
@@ -286,8 +307,17 @@ class LLMClient:
             self._token_provider = get_bearer_token_provider(AzureCliCredential(), token_scope)
         self._llm_client = None
         self._embed_client = None
+        self._embed_http_client = None
+        self._local_http_client = None
         self._cfg = llm_cfg
         self._embed_dimensions = int(llm_cfg.get("embed_dimensions") or 0)
+        self._use_local_fallback_for_subtasks = bool(llm_cfg.get("use_local_fallback_for_subtasks", False))
+        self._local_fallback_endpoint = str(llm_cfg.get("local_fallback_endpoint", "http://localhost:11434/api/generate") or "").strip()
+        self._local_fallback_model = str(llm_cfg.get("local_fallback_model", "") or "").strip()
+        self._premium_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("premium_max_concurrency", 4))))
+        self._local_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("local_max_concurrency", 8))))
+        self._response_cache = LRUCache(int(llm_cfg.get("prompt_cache_size", 2048)))
+        self._embed_cache = LRUCache(int(llm_cfg.get("embed_cache_size", 4096)))
 
     def _normalize_embedding(self, embedding: list[float]) -> list[float]:
         if self._embed_dimensions <= 0:
@@ -331,18 +361,24 @@ class LLMClient:
             self._embed_client = AsyncAzureOpenAI(**client_kwargs)
         return self._embed_client
     
-    async def complete(self, prompt: str, retries: int | None = None, label: str = "LLM complete") -> str:
+    def _should_use_local_fallback(self, label: str) -> bool:
+        if not self._use_local_fallback_for_subtasks:
+            return False
+        return label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer")
+
+    async def _complete_premium(self, prompt: str, retries: int, label: str) -> str:
         if retries is None:
             retries = int(self._cfg["max_retries"])
         for attempt in range(retries):
             try:
                 t = _ck(f"{label} – start")
-                result = await self.llm_client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=self._cfg["llm_model"],
-                    temperature=self._cfg["temperature"],
-                    max_completion_tokens=self._cfg["max_completion_tokens"],
-                )
+                async with self._premium_semaphore:
+                    result = await self.llm_client.chat.completions.create(
+                        messages=[{"role": "user", "content": prompt}],
+                        model=self._cfg["llm_model"],
+                        temperature=self._cfg["temperature"],
+                        max_completion_tokens=self._cfg["max_completion_tokens"],
+                    )
                 _ck(f"{label} – done", t)
                 return result.choices[0].message.content or ""
             except openai.RateLimitError:
@@ -351,27 +387,81 @@ class LLMClient:
                 await asyncio.sleep(wait)
             except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
-                print(f"API error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
+                print(f"LLMAPI error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
                 await asyncio.sleep(wait)
         raise Exception("Max retries exceeded")
+
+    async def _complete_local(self, prompt: str, label: str) -> str:
+        if not self._local_fallback_endpoint or not self._local_fallback_model:
+            raise RuntimeError("Local fallback endpoint/model is not configured")
+        if self._local_http_client is None:
+            self._local_http_client = httpx.AsyncClient(timeout=120)
+        t = _ck(f"{label} (local) – start")
+        async with self._local_semaphore:
+            response = await self._local_http_client.post(
+                self._local_fallback_endpoint,
+                json={
+                    "model": self._local_fallback_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": self._cfg["temperature"]},
+                },
+                headers={"Content-Type": "application/json"},
+            )
+        response.raise_for_status()
+        payload = response.json()
+        text = payload.get("response")
+        if not isinstance(text, str):
+            raise RuntimeError(f"Unexpected local fallback payload: {payload}")
+        _ck(f"{label} (local) – done", t)
+        return text
+
+    async def complete(self, prompt: str, retries: int | None = None, label: str = "LLM complete") -> str:
+        if retries is None:
+            retries = int(self._cfg["max_retries"])
+
+        use_local = self._should_use_local_fallback(label)
+        route_key = "local" if use_local else "premium"
+        cache_key = f"{route_key}|{label}|{prompt}"
+        cached = self._response_cache.get(cache_key)
+        if isinstance(cached, str):
+            return cached
+
+        if use_local:
+            try:
+                local_response = await self._complete_local(prompt, label)
+                self._response_cache.set(cache_key, local_response)
+                return local_response
+            except Exception as e:
+                print(f"Local fallback error ({type(e).__name__}); falling back to premium model")
+
+        premium_response = await self._complete_premium(prompt, retries, label)
+        self._response_cache.set(cache_key, premium_response)
+        return premium_response
     
     async def embed(self, text: str) -> list[float]:
+        cached = self._embed_cache.get(text)
+        if isinstance(cached, list):
+            return list(cached)
         embed_endpoint = str(self._cfg.get("embed_endpoint", "")).strip()
         if embed_endpoint.endswith("/api/embeddings"):
             try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    response = await client.post(
-                        embed_endpoint,
-                        json={"model": self._cfg["embed_model"], "prompt": text},
-                        headers={"Content-Type": "application/json"},
-                    )
+                if self._embed_http_client is None:
+                    self._embed_http_client = httpx.AsyncClient(timeout=60)
+                response = await self._embed_http_client.post(
+                    embed_endpoint,
+                    json={"model": self._cfg["embed_model"], "prompt": text},
+                    headers={"Content-Type": "application/json"},
+                )
                 response.raise_for_status()
                 body = response.text
                 parsed = json.loads(body)
                 embedding = parsed.get("embedding")
                 if not isinstance(embedding, list):
                     raise ValueError("Invalid Ollama embedding response: missing 'embedding' list")
-                return self._normalize_embedding(embedding)
+                normalized = self._normalize_embedding(embedding)
+                self._embed_cache.set(text, normalized)
+                return list(normalized)
             except httpx.HTTPStatusError as e:
                 detail = e.response.text if e.response is not None else ""
                 status = e.response.status_code if e.response is not None else "unknown"
@@ -388,7 +478,9 @@ class LLMClient:
         t = _ck("embed – start")
         result = await self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
         _ck("embed – done", t)
-        return self._normalize_embedding(result.data[0].embedding)
+        normalized = self._normalize_embedding(result.data[0].embedding)
+        self._embed_cache.set(text, normalized)
+        return list(normalized)
 
     async def close(self):
         if self._llm_client is not None:
@@ -397,6 +489,12 @@ class LLMClient:
         if self._embed_client is not None:
             await self._embed_client.close()
             self._embed_client = None
+        if self._embed_http_client is not None:
+            await self._embed_http_client.aclose()
+            self._embed_http_client = None
+        if self._local_http_client is not None:
+            await self._local_http_client.aclose()
+            self._local_http_client = None
 
 # =============================================================================
 # COSMOS DB RETRIEVER
@@ -466,6 +564,7 @@ class CombinedRetriever:
         self._structured_partition_key_path = str(COSMOS_STRUCTURED_PARTITION_KEY_PATH or "").strip()
         self._unstructured_partition_key_path = str(COSMOS_UNSTRUCTURED_PARTITION_KEY_PATH or "").strip()
         self._credential = None
+        self._retrieve_cache = LRUCache(int(CONFIG.get("retrieval", {}).get("cache_size", 2000)))
 
     def _partition_key_expr(self, partition_key_path: str) -> str:
         segments = [s for s in partition_key_path.split("/") if s]
@@ -539,8 +638,7 @@ class CombinedRetriever:
                 adjusted_emb = adjusted_emb[:self._expected_vector_dim]
             elif len(adjusted_emb) < self._expected_vector_dim:
                 adjusted_emb = adjusted_emb + [0.0] * (self._expected_vector_dim - len(adjusted_emb))
-        pk_expr = self._partition_key_expr(partition_key_path)
-        sql = f"SELECT TOP @k c.id, {pk_expr} AS pkv, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)"
+        sql = "SELECT TOP @k c, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)"
         if _TIMING:
             with _print_lock:
                 text_preview = f", text={query_text!r}" if query_text else ""
@@ -578,19 +676,15 @@ class CombinedRetriever:
         _ck(f"vector query – done ({len(results)} results){activity_id_note}{reason_note}", t)
         docs = []
         t_reads = time.perf_counter()
-        read_coros = []
-        result_refs = []
         for r in results:
-            partition_key_value = r.get("pkv")
-            if partition_key_value is None:
+            doc = r.get("c") if isinstance(r.get("c"), dict) else None
+            if doc is None:
+                doc = {k: v for k, v in r.items() if k != "score"}
+            if not isinstance(doc, dict):
                 continue
-            read_coros.append(container.read_item(item=r["id"], partition_key=partition_key_value))
-            result_refs.append(r)
-        read_docs = await asyncio.gather(*read_coros) if read_coros else []
-        for r, doc in zip(result_refs, read_docs):
             doc["_score"] = r.get("score")
             docs.append(doc)
-        _ck(f"read_item x{len(docs)} ({container.id}) – done", t_reads)
+        _ck(f"vector materialize x{len(docs)} ({container.id}) – done", t_reads)
         return docs
     
     def _format_doc(self, doc: dict, source: str) -> RetrievedChunk:
@@ -611,6 +705,12 @@ class CombinedRetriever:
         if self._llm is None or self._structured is None or self._unstructured is None:
             raise RuntimeError("Retriever is not initialized")
         t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
+
+        cached = self._retrieve_cache.get(query)
+        if isinstance(cached, list):
+            _ck("retrieve – cache hit", t_retrieve)
+            return copy.deepcopy(cached)
+
         chunks, seen = [], set()
 
         t = _ck("  retrieve: fulltext – start (parallel)")
@@ -668,6 +768,8 @@ class CombinedRetriever:
             selected = greedy_log_det_select(vectors, query_vec, self.k_diverse, self.eta, self.rescale_power)
             chunks = [chunks[i] for i in selected]
             _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)})", t)
+
+        self._retrieve_cache.set(query, copy.deepcopy(chunks))
         
         _ck(f"retrieve – TOTAL ({len(chunks)} chunks returned)", t_retrieve)
         return chunks
@@ -688,11 +790,22 @@ class CombinedRetriever:
 # =============================================================================
 
 class DecomposedRAGPipeline:
-    def __init__(self, retriever: CombinedRetriever, llm: LLMClient, max_sub_q: int = 5, num_rounds: int = 2):
+    def __init__(
+        self,
+        retriever: CombinedRetriever,
+        llm: LLMClient,
+        max_sub_q: int = 5,
+        num_rounds: int = 2,
+        subq_fanout_cap: int | None = None,
+        subq_max_concurrency: int = 2,
+    ):
         self.retriever = retriever
         self.llm = llm
         self.max_sub_q = max_sub_q
         self.num_rounds = num_rounds
+        default_fanout = min(max_sub_q, 3)
+        self.subq_fanout_cap = max(1, subq_fanout_cap or default_fanout)
+        self.subq_max_concurrency = max(1, subq_max_concurrency)
     
     def _format_context(self, chunks: list[RetrievedChunk]) -> str:
         return "\n\n".join(f"[{i+1}] {c.text}" for i, c in enumerate(chunks))
@@ -706,10 +819,32 @@ class DecomposedRAGPipeline:
             if match:
                 subs = json.loads(match.group())
                 if isinstance(subs, list):
-                    return [s for s in subs if isinstance(s, str)][:self.max_sub_q]
+                    filtered: list[str] = []
+                    seen: set[str] = set()
+                    max_fanout = min(self.max_sub_q, self.subq_fanout_cap)
+                    for s in subs:
+                        if not isinstance(s, str):
+                            continue
+                        normalized = s.strip()
+                        if not normalized or normalized in seen:
+                            continue
+                        seen.add(normalized)
+                        filtered.append(normalized)
+                        if len(filtered) >= max_fanout:
+                            break
+                    return filtered
         except:
             pass
         return []
+
+    async def _answer_subquestions_bounded(self, sub_qs: list[str]) -> list[SubQuestionResult]:
+        semaphore = asyncio.Semaphore(self.subq_max_concurrency)
+
+        async def _run_one(sub_q: str) -> SubQuestionResult:
+            async with semaphore:
+                return await self._answer_subquestion(sub_q)
+
+        return await asyncio.gather(*(_run_one(sub_q) for sub_q in sub_qs))
     
     async def _answer_subquestion(self, sub_q: str) -> SubQuestionResult:
         chunks = await self.retriever.retrieve(sub_q)
@@ -742,10 +877,10 @@ class DecomposedRAGPipeline:
             if not sub_qs:
                 break
             
-            # Process sub-questions in parallel
-            t = _ck(f"pipeline: round {rnd} sub-Q parallel ({len(sub_qs)}) – start")
-            sub_results = await asyncio.gather(*(self._answer_subquestion(sub_q) for sub_q in sub_qs))
-            _ck(f"pipeline: round {rnd} sub-Q parallel – done", t)
+            # Process sub-questions with bounded concurrency to reduce LLM retry pressure
+            t = _ck(f"pipeline: round {rnd} sub-Q bounded ({len(sub_qs)}, cap={self.subq_max_concurrency}) – start")
+            sub_results = await self._answer_subquestions_bounded(sub_qs)
+            _ck(f"pipeline: round {rnd} sub-Q bounded – done", t)
             all_subs.extend(sub_results)
             
             if rnd < self.num_rounds:
@@ -796,6 +931,7 @@ def load_questions(path: Path) -> list[Question]:
 
 async def main_async():
     parser = argparse.ArgumentParser()
+    pipeline_cfg = CONFIG.get("pipeline", {})
     parser.add_argument("--config", type=Path, default=None, help="Override config yaml path")
     parser.add_argument("--k-fulltext", type=int, default=CONFIG["retrieval"]["k_fulltext"])
     parser.add_argument("--k-structured", type=int, default=CONFIG["retrieval"]["k_structured"])
@@ -803,8 +939,10 @@ async def main_async():
     parser.add_argument("--k-diverse", type=int, default=CONFIG["retrieval"]["k_diverse"], help="Diverse chunks to select via log-det (0=disabled)")
     parser.add_argument("--eta", type=float, default=CONFIG["retrieval"]["eta"], help="Gram matrix regularization")
     parser.add_argument("--rescale-power", type=float, default=CONFIG["retrieval"]["rescale_power"], help="Query-similarity rescale power")
-    parser.add_argument("--max-sub-questions", type=int, default=CONFIG["pipeline"]["max_sub_questions"])
-    parser.add_argument("--rounds", type=int, default=CONFIG["pipeline"]["rounds"])
+    parser.add_argument("--max-sub-questions", type=int, default=pipeline_cfg.get("max_sub_questions", 5))
+    parser.add_argument("--subq-fanout-cap", type=int, default=pipeline_cfg.get("subq_fanout_cap", 3))
+    parser.add_argument("--subq-max-concurrency", type=int, default=pipeline_cfg.get("subq_max_concurrency", 2))
+    parser.add_argument("--rounds", type=int, default=pipeline_cfg.get("rounds", 2))
     parser.add_argument("--max-questions", type=int, default=CONFIG["execution"]["max_questions"])
     parser.add_argument("--max-workers", type=int, default=CONFIG["execution"]["max_workers"])
     parser.add_argument("--questions-path", type=Path, default=Path(CONFIG["paths"]["questions_path"]))
@@ -827,7 +965,14 @@ async def main_async():
     await retriever.initialize()
     _ck("retriever.initialize – done", t)
     llm = LLMClient()
-    pipeline = DecomposedRAGPipeline(retriever, llm, args.max_sub_questions, args.rounds)
+    pipeline = DecomposedRAGPipeline(
+        retriever,
+        llm,
+        args.max_sub_questions,
+        args.rounds,
+        args.subq_fanout_cap,
+        args.subq_max_concurrency,
+    )
     
     questions = load_questions(args.questions_path)
     if args.max_questions:

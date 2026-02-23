@@ -10,10 +10,13 @@ retrieval:
   k_diverse: 80       # 0 = disabled; >0 = select this many diverse chunks via log-det
   eta: 0.0            # Gram matrix regularization
   rescale_power: 5.0  # Query-similarity rescale power
+  cache_size: 2000
 
 # Pipeline parameters
 pipeline:
   max_sub_questions: 5
+  subq_fanout_cap: 3
+  subq_max_concurrency: 2
   rounds: 5
 
 # Execution parameters
@@ -30,13 +33,20 @@ paths:
 llm:
   llm_endpoint: ""
   embed_endpoint: ""
+  local_fallback_endpoint: "http://localhost:11434/api/generate"
   api_version: "2024-05-01-preview"
   llm_model: "model-router"
+  local_fallback_model: ""
   embed_model: ""
   embed_dimensions: 1024
   temperature: 0.0
   max_completion_tokens: 4096
   max_retries: 2
+  use_local_fallback_for_subtasks: true
+  premium_max_concurrency: 4
+  local_max_concurrency: 8
+  prompt_cache_size: 2048
+  embed_cache_size: 4096
   use_rbac_auth: false
   token_scope: ""
 
