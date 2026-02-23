@@ -318,6 +318,17 @@ class LLMClient:
         self._local_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("local_max_concurrency", 8))))
         self._response_cache = LRUCache(int(llm_cfg.get("prompt_cache_size", 2048)))
         self._embed_cache = LRUCache(int(llm_cfg.get("embed_cache_size", 4096)))
+        self._local_fallback_failure_threshold = 3
+        self._local_fallback_cooldown_seconds = 120
+        self._local_fallback_failures = 0
+        self._local_fallback_disabled_until = 0.0
+        self._default_chars_per_token = 4.0
+        self._chars_per_token_estimate = self._default_chars_per_token
+        self._min_completion_tokens = 256
+        self._max_context_tokens_hint: int | None = None
+        self._max_output_tokens_hint: int | None = None
+        self._introspection_done = False
+        self._introspection_lock = asyncio.Lock()
 
     def _normalize_embedding(self, embedding: list[float]) -> list[float]:
         if self._embed_dimensions <= 0:
@@ -364,27 +375,223 @@ class LLMClient:
     def _should_use_local_fallback(self, label: str) -> bool:
         if not self._use_local_fallback_for_subtasks:
             return False
+        if self._local_fallback_disabled_until > time.time():
+            return False
         return label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer")
+
+    def _truncate_prompt(self, prompt: str, max_chars: int) -> str:
+        if len(prompt) <= max_chars:
+            return prompt
+        head = int(max_chars * 0.6)
+        tail = max_chars - head
+        return (
+            prompt[:head]
+            + "\n\n[... context truncated to satisfy model request constraints ...]\n\n"
+            + prompt[-tail:]
+        )
+
+    @staticmethod
+    def _extract_first_int(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, str):
+            match = re.search(r"\d+", value)
+            if match:
+                number = int(match.group(0))
+                return number if number > 0 else None
+        return None
+
+    def _update_limit_hints(self, context_tokens: int | None = None, output_tokens: int | None = None) -> None:
+        if context_tokens:
+            self._max_context_tokens_hint = context_tokens if self._max_context_tokens_hint is None else min(self._max_context_tokens_hint, context_tokens)
+        if output_tokens:
+            self._max_output_tokens_hint = output_tokens if self._max_output_tokens_hint is None else min(self._max_output_tokens_hint, output_tokens)
+
+    async def _introspect_llm_capabilities(self) -> None:
+        if self._introspection_done:
+            return
+        async with self._introspection_lock:
+            if self._introspection_done:
+                return
+            try:
+                model_name = self._cfg["llm_model"]
+                model_obj = None
+                try:
+                    model_obj = await self.llm_client.models.retrieve(model_name)
+                except Exception:
+                    pass
+                if model_obj is None:
+                    try:
+                        models = await self.llm_client.models.list()
+                        for candidate in models.data:
+                            if getattr(candidate, "id", None) == model_name:
+                                model_obj = candidate
+                                break
+                    except Exception:
+                        pass
+
+                if model_obj is not None:
+                    as_dict = model_obj.model_dump() if hasattr(model_obj, "model_dump") else dict(model_obj)
+                    context_keys = [
+                        "context_length",
+                        "max_context_tokens",
+                        "input_token_limit",
+                        "max_input_tokens",
+                        "token_limit",
+                    ]
+                    output_keys = [
+                        "output_token_limit",
+                        "max_output_tokens",
+                        "max_completion_tokens",
+                    ]
+                    context_tokens = next((self._extract_first_int(as_dict.get(k)) for k in context_keys if self._extract_first_int(as_dict.get(k))), None)
+                    output_tokens = next((self._extract_first_int(as_dict.get(k)) for k in output_keys if self._extract_first_int(as_dict.get(k))), None)
+                    self._update_limit_hints(context_tokens=context_tokens, output_tokens=output_tokens)
+            finally:
+                self._introspection_done = True
+
+    def _update_hints_from_headers(self, headers: dict[str, str]) -> None:
+        context_header_keys = [
+            "x-model-context-length",
+            "x-max-context-tokens",
+            "x-max-input-tokens",
+            "x-azure-openai-model-context-length",
+        ]
+        output_header_keys = [
+            "x-max-output-tokens",
+            "x-max-completion-tokens",
+            "x-azure-openai-max-output-tokens",
+        ]
+        context_tokens = next((self._extract_first_int(headers.get(k)) for k in context_header_keys if self._extract_first_int(headers.get(k))), None)
+        output_tokens = next((self._extract_first_int(headers.get(k)) for k in output_header_keys if self._extract_first_int(headers.get(k))), None)
+        self._update_limit_hints(context_tokens=context_tokens, output_tokens=output_tokens)
+
+    def _update_hints_from_badrequest(self, error_text: str) -> None:
+        txt = error_text.lower()
+        context_patterns = [
+            r"maximum context length is\s*(\d+)",
+            r"max(?:imum)?\s+context\s+length\s*(?:is|:)\s*(\d+)",
+            r"max(?:imum)?\s+input\s+tokens?\s*(?:is|:)\s*(\d+)",
+        ]
+        output_patterns = [
+            r"max(?:imum)?\s+output\s+tokens?\s*(?:is|:)\s*(\d+)",
+            r"max(?:imum)?\s+completion\s+tokens?\s*(?:is|:)\s*(\d+)",
+        ]
+        context_tokens = None
+        output_tokens = None
+        for pattern in context_patterns:
+            match = re.search(pattern, txt)
+            if match:
+                context_tokens = int(match.group(1))
+                break
+        for pattern in output_patterns:
+            match = re.search(pattern, txt)
+            if match:
+                output_tokens = int(match.group(1))
+                break
+
+        requested_match = re.search(r"requested\s*(\d+)\s*tokens?\s*\((\d+)\s*in the messages,\s*(\d+)\s*in the completion", txt)
+        if requested_match:
+            msg_tokens = int(requested_match.group(2))
+            completion_tokens = int(requested_match.group(3))
+            if context_tokens is None:
+                context_tokens = msg_tokens + completion_tokens - 1
+            if output_tokens is None and completion_tokens > 0:
+                output_tokens = completion_tokens - 1
+
+        self._update_limit_hints(context_tokens=context_tokens, output_tokens=output_tokens)
+
+    def _effective_max_completion_tokens(self, requested_tokens: int) -> int:
+        limit = requested_tokens
+        if self._max_output_tokens_hint is not None:
+            limit = min(limit, self._max_output_tokens_hint)
+        return max(self._min_completion_tokens, int(limit))
+
+    def _effective_prompt_char_limit(self, max_completion_tokens: int) -> int | None:
+        if self._max_context_tokens_hint is None:
+            return None
+        reserve_tokens = max(self._min_completion_tokens, max_completion_tokens) + 256
+        available_prompt_tokens = self._max_context_tokens_hint - reserve_tokens
+        if available_prompt_tokens <= 0:
+            available_prompt_tokens = self._max_context_tokens_hint // 2
+        return max(2000, int(available_prompt_tokens * self._chars_per_token_estimate))
+
+    def _safe_fallback_response(self, label: str) -> str:
+        if label.startswith("LLM gap-decompose"):
+            return "[]"
+        if label.startswith("LLM sub-Q answer"):
+            return "Insufficient context to answer this sub-question reliably."
+        if label.startswith("LLM regenerate"):
+            return "Unable to regenerate answer due request constraints."
+        if label.startswith("LLM synthesis"):
+            return "Unable to synthesize final answer due request constraints."
+        return "Unable to generate response due request constraints."
+
+    async def _complete_premium_once(self, prompt: str, label: str, max_completion_tokens: int) -> str:
+        await self._introspect_llm_capabilities()
+        max_completion_tokens = self._effective_max_completion_tokens(max_completion_tokens)
+        prompt_char_limit = self._effective_prompt_char_limit(max_completion_tokens)
+        if prompt_char_limit is not None:
+            prompt = self._truncate_prompt(prompt, prompt_char_limit)
+
+        t = _ck(f"{label} – start")
+        async with self._premium_semaphore:
+            raw_response = await self.llm_client.chat.completions.with_raw_response.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=self._cfg["llm_model"],
+                temperature=self._cfg["temperature"],
+                max_completion_tokens=max_completion_tokens,
+            )
+        result = raw_response.parse()
+        _ck(f"{label} – done", t)
+
+        headers = {str(k).lower(): str(v) for k, v in raw_response.headers.items()}
+        self._update_hints_from_headers(headers)
+
+        usage = getattr(result, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage is not None else None
+        if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+            observed = len(prompt) / float(prompt_tokens)
+            observed = min(8.0, max(2.0, observed))
+            self._chars_per_token_estimate = (self._chars_per_token_estimate * 0.8) + (observed * 0.2)
+
+        return result.choices[0].message.content or ""
 
     async def _complete_premium(self, prompt: str, retries: int, label: str) -> str:
         if retries is None:
             retries = int(self._cfg["max_retries"])
+        max_completion_tokens = int(self._cfg["max_completion_tokens"])
         for attempt in range(retries):
             try:
-                t = _ck(f"{label} – start")
-                async with self._premium_semaphore:
-                    result = await self.llm_client.chat.completions.create(
-                        messages=[{"role": "user", "content": prompt}],
-                        model=self._cfg["llm_model"],
-                        temperature=self._cfg["temperature"],
-                        max_completion_tokens=self._cfg["max_completion_tokens"],
-                    )
-                _ck(f"{label} – done", t)
-                return result.choices[0].message.content or ""
+                return await self._complete_premium_once(prompt, label, max_completion_tokens)
             except openai.RateLimitError:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
                 print(f"Rate limited, retry in {wait}s ({attempt + 1}/{retries})")
                 await asyncio.sleep(wait)
+            except openai.BadRequestError as e:
+                error_text = str(e)
+                self._update_hints_from_badrequest(error_text)
+                err_text = str(e).lower()
+                prior_completion_tokens = max_completion_tokens
+                max_completion_tokens = self._effective_max_completion_tokens(max_completion_tokens)
+                prompt_limit = self._effective_prompt_char_limit(max_completion_tokens)
+                changed = False
+                if max_completion_tokens < prior_completion_tokens:
+                    changed = True
+                if prompt_limit is not None and len(prompt) > prompt_limit:
+                    prompt = self._truncate_prompt(prompt, prompt_limit)
+                    changed = True
+                if not changed and ("maximum context" in err_text or "max tokens" in err_text or "token" in err_text):
+                    prompt = self._truncate_prompt(prompt, max(2000, int(len(prompt) * 0.7)))
+                    max_completion_tokens = max(self._min_completion_tokens, int(max_completion_tokens * 0.75))
+                    changed = True
+                if changed:
+                    print(
+                        f"BadRequestError on {label}; retrying with adaptive limits "
+                        f"(max_completion_tokens={max_completion_tokens})"
+                    )
+                    continue
+                raise
             except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
                 print(f"LLMAPI error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
@@ -430,12 +637,30 @@ class LLMClient:
         if use_local:
             try:
                 local_response = await self._complete_local(prompt, label)
+                self._local_fallback_failures = 0
                 self._response_cache.set(cache_key, local_response)
                 return local_response
             except Exception as e:
+                self._local_fallback_failures += 1
+                if self._local_fallback_failures >= self._local_fallback_failure_threshold:
+                    self._local_fallback_disabled_until = time.time() + self._local_fallback_cooldown_seconds
+                    print(
+                        f"Local fallback temporarily disabled for {self._local_fallback_cooldown_seconds}s "
+                        f"after {self._local_fallback_failures} failures"
+                    )
                 print(f"Local fallback error ({type(e).__name__}); falling back to premium model")
 
-        premium_response = await self._complete_premium(prompt, retries, label)
+        try:
+            premium_response = await self._complete_premium(prompt, retries, label)
+        except openai.BadRequestError as e:
+            print(f"BadRequestError on {label}; using safe fallback response")
+            premium_response = self._safe_fallback_response(label)
+        except Exception:
+            if label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer"):
+                print(f"{label} failed after retries; using safe fallback response")
+                premium_response = self._safe_fallback_response(label)
+            else:
+                raise
         self._response_cache.set(cache_key, premium_response)
         return premium_response
     
