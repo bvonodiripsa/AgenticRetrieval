@@ -115,16 +115,30 @@ Typical limited smoke test:
 python rag_divdet.py --max-questions 1
 ```
 
+### 4) Generate timing summary table
+
+Run:
+
+```bash
+python timing_summary.py
+```
+
+What this script does:
+
+- Runs a fresh timed benchmark (`rag_divdet.py --max-questions 5 --timing`).
+- Parses key retrieval/LLM timing checkpoints from the terminal output.
+- Writes a timestamped log in `out/` (`timing_5q_rerun_<timestamp>.log`).
+- Updates `out/timing_5q_latest.log` with the newest run.
+- Generates a table at `out/timing_5q_compare_table.tsv`:
+  - If no previous latest log exists: prints/writes `Component` + `This run`.
+  - If previous latest log exists: prints/writes `Component`, `Prev run`, `This run`, and `Change`.
+
 Outputs are written to:
 
 - `out/k.../intermediate/...` (per-question intermediate traces)
 - `out/k.../questions_with_answers.json` (final grouped answers)
 
 ## Useful runtime overrides
-
-`rag_divdet.py` supports CLI overrides for retrieval/pipeline settings, including:
-
-- `--k-fulltext` (optional: overrides `fulltext_k` for all configured sources)
 - `--k-diverse`
 - `--eta`
 - `--rescale-power`
@@ -155,6 +169,7 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert
 - `rag_divdet.py` — decomposed RAG retrieval/answer pipeline
+- `timing_summary.py` — timed rerun + timing comparison table generation
 - `config.yaml.example` — full config template
 - `data/` — sample input corpus
 - `out/` — generated outputs
