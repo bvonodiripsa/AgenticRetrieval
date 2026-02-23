@@ -65,7 +65,7 @@ COSMOS_KEY = CONFIG["cosmos"]["key"]
 DATABASE_NAME = CONFIG["cosmos"]["database_name"]
 
 # Azure Resource Manager configuration (extracted from endpoint)
-# e.g., https://skf-rag-test.documents.azure.com:443/ -> account name is skf-rag-test
+# e.g., https://myaccount.documents.azure.com:443/ -> account name is myaccount
 COSMOS_ACCOUNT_NAME = CONFIG["cosmos"]["cosmos_account_name"]
 COSMOS_RESOURCE_GROUP = CONFIG["cosmos"]["cosmos_resource_group"]
 AZURE_SUBSCRIPTION_ID = CONFIG["cosmos"]["azure_subscription_id"]
@@ -228,7 +228,7 @@ def get_cosmos_client(use_rbac_auth: bool, credential=None) -> CosmosClient:
 
 def extract_account_name_from_endpoint(endpoint: str) -> str:
     """Extract the Cosmos DB account name from the endpoint URL."""
-    # https://skf-rag-test.documents.azure.com:443/ -> skf-rag-test
+    # https://myaccount.documents.azure.com:443/ -> account name is myaccount
     match = re.match(r'https://([^.]+)\.documents\.azure\.com', endpoint)
     if match:
         return match.group(1)
