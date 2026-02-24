@@ -70,14 +70,15 @@ COSMOS_ACCOUNT_NAME = CONFIG["cosmos"]["cosmos_account_name"]
 COSMOS_RESOURCE_GROUP = CONFIG["cosmos"]["cosmos_resource_group"]
 AZURE_SUBSCRIPTION_ID = CONFIG["cosmos"]["azure_subscription_id"]
 
-# Embedding configuration (single source of truth)
-EMBED_ENDPOINT = str(CONFIG["llm"]["embed_endpoint"]).strip().strip('"')
-EMBED_MODEL = CONFIG["llm"]["embed_model"]
-EMBEDDING_DIMENSIONS = int(CONFIG["llm"]["embed_dimensions"])
+# Embedding configuration: 'embedding' section overrides 'llm' section for backward compatibility
+_EMBED_CFG = {**CONFIG.get("llm", {}), **CONFIG.get("embedding", {})}
+EMBED_ENDPOINT = str(_EMBED_CFG.get("embed_endpoint", "")).strip().strip('"')
+EMBED_MODEL = _EMBED_CFG.get("embed_model", "")
+EMBEDDING_DIMENSIONS = int(_EMBED_CFG.get("embed_dimensions", 1024))
 LLM_API_VERSION = CONFIG["llm"]["api_version"]
 _SHARED_KEY = CONFIG["llm"].get("azure_openai_key", "")
 AZURE_OPENAI_KEY = _SHARED_KEY  # kept for backward compatibility
-EMBED_API_KEY = str(CONFIG["llm"].get("embed_api_key") or _SHARED_KEY or "").strip()
+EMBED_API_KEY = str(_EMBED_CFG.get("embed_api_key") or _SHARED_KEY or "").strip()
 
 # Batch configuration
 EMBEDDING_BATCH_SIZE = int(CONFIG["cosmos"]["embedding_batch_size"])  # Number of texts to embed in one API call
