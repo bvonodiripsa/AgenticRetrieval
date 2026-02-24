@@ -298,7 +298,11 @@ class LLMClient:
     def __init__(self):
         llm_cfg = CONFIG["llm"]
         self._use_rbac_auth = bool(llm_cfg["use_rbac_auth"])
-        self._api_key = llm_cfg["azure_openai_key"]
+        _shared_key = llm_cfg.get("azure_openai_key", "")
+        self._llm_api_key = str(llm_cfg.get("llm_api_key") or _shared_key or "").strip()
+        self._embed_api_key = str(llm_cfg.get("embed_api_key") or _shared_key or "").strip()
+        # Keep for backward compatibility
+        self._api_key = _shared_key
         self._token_provider = None
         if self._use_rbac_auth:
             token_scope = llm_cfg.get("token_scope")
@@ -350,9 +354,9 @@ class LLMClient:
             if self._use_rbac_auth:
                 client_kwargs["azure_ad_token_provider"] = self._token_provider
             else:
-                if not self._api_key or not str(self._api_key).strip():
-                    raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
-                client_kwargs["api_key"] = self._api_key
+                if not self._llm_api_key:
+                    raise ValueError("llm.llm_api_key (or llm.azure_openai_key) must be set when llm.use_rbac_auth is false")
+                client_kwargs["api_key"] = self._llm_api_key
             self._llm_client = AsyncAzureOpenAI(**client_kwargs)
         return self._llm_client
     
@@ -366,9 +370,9 @@ class LLMClient:
             if self._use_rbac_auth:
                 client_kwargs["azure_ad_token_provider"] = self._token_provider
             else:
-                if not self._api_key or not str(self._api_key).strip():
-                    raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
-                client_kwargs["api_key"] = self._api_key
+                if not self._embed_api_key:
+                    raise ValueError("llm.embed_api_key (or llm.azure_openai_key) must be set when llm.use_rbac_auth is false")
+                client_kwargs["api_key"] = self._embed_api_key
             self._embed_client = AsyncAzureOpenAI(**client_kwargs)
         return self._embed_client
     

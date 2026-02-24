@@ -49,8 +49,12 @@ llm:
   use_rbac_auth: false
   token_scope: ""
 
-  # Shared API key (used when llm_endpoint/embed_endpoint target Azure OpenAI)
-  azure_openai_key: ""
+  # API keys for Azure OpenAI endpoints.
+  # Use llm_api_key / embed_api_key to set separate keys for each endpoint.
+  # If llm_api_key or embed_api_key is not set, azure_openai_key is used as a fallback.
+  azure_openai_key: ""   # Shared fallback key
+  llm_api_key: ""        # Key for llm_endpoint (overrides azure_openai_key when set)
+  embed_api_key: ""      # Key for embed_endpoint (overrides azure_openai_key when set)
 
 # Cosmos DB settings
 cosmos:
