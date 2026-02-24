@@ -317,12 +317,14 @@ class LLMClient:
         self._local_http_client = None
         self._cfg = llm_cfg
         self._embed_cfg = embed_cfg
+        # Local fallback config: 'local_llm' section overrides 'llm' section for backward compatibility
+        local_cfg = {**llm_cfg, **CONFIG.get("local_llm", {})}
         self._embed_dimensions = int(embed_cfg.get("embed_dimensions") or 0)
-        self._use_local_fallback_for_subtasks = bool(llm_cfg.get("use_local_fallback_for_subtasks", False))
-        self._local_fallback_endpoint = str(llm_cfg.get("local_fallback_endpoint", "http://localhost:11434/api/generate") or "").strip()
-        self._local_fallback_model = str(llm_cfg.get("local_fallback_model", "") or "").strip()
+        self._use_local_fallback_for_subtasks = bool(local_cfg.get("use_local_fallback_for_subtasks", False))
+        self._local_fallback_endpoint = str(local_cfg.get("local_fallback_endpoint", "http://localhost:11434/api/generate") or "").strip()
+        self._local_fallback_model = str(local_cfg.get("local_fallback_model", "") or "").strip()
         self._premium_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("premium_max_concurrency", 4))))
-        self._local_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("local_max_concurrency", 8))))
+        self._local_semaphore = asyncio.Semaphore(max(1, int(local_cfg.get("local_max_concurrency", 8))))
         self._response_cache = LRUCache(int(llm_cfg.get("prompt_cache_size", 2048)))
         self._embed_cache = LRUCache(int(embed_cfg.get("embed_cache_size", 4096)))
         self._local_fallback_failure_threshold = 3
