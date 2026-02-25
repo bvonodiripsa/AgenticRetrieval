@@ -1366,10 +1366,10 @@ async def main_async():
             finally:
                 pbar.update(1)
     
-    # Save final results - group by question group
+    # Save final results - one answer file per input questions file
     llm_model = CONFIG["llm"]["llm_model"]
     embed_model = CONFIG["llm"]["embed_model"]
-    grouped = {}
+    grouped: dict[str, list] = {}
     for r in results:
         group = r.get("group", "default")
         if group not in grouped:
@@ -1382,10 +1382,11 @@ async def main_async():
             "llm_model": llm_model,
             "embed_model": embed_model,
         })
+    # Single timestamp shared across all output files so they are identifiable as one run
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    questions_stem = args.questions_path.stem
-    answers_filename = f"{questions_stem}_{timestamp}.json"
-    await asyncio.to_thread((output_path / answers_filename).write_text, json.dumps(grouped, indent=2))
+    for source_stem, answers in grouped.items():
+        answers_filename = f"{source_stem}_{timestamp}.json"
+        await asyncio.to_thread((output_path / answers_filename).write_text, json.dumps(answers, indent=2))
     print(f"Done! Results: {output_path}")
 
     await retriever.close()
