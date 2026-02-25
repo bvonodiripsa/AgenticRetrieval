@@ -4,6 +4,7 @@
 import argparse
 import asyncio
 import copy
+import datetime
 import json
 import os
 import re
@@ -1366,6 +1367,8 @@ async def main_async():
                 pbar.update(1)
     
     # Save final results - group by question group
+    llm_model = CONFIG["llm"]["llm_model"]
+    embed_model = CONFIG["llm"]["embed_model"]
     grouped = {}
     for r in results:
         group = r.get("group", "default")
@@ -1375,9 +1378,14 @@ async def main_async():
             "question_id": r["question_id"],
             "question_text": r["question_text"],
             "answer": r["final_answer"],
-            "ground_truth": r.get("ground_truth")
+            "ground_truth": r.get("ground_truth"),
+            "llm_model": llm_model,
+            "embed_model": embed_model,
         })
-    await asyncio.to_thread((output_path / "questions_with_answers.json").write_text, json.dumps(grouped, indent=2))
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    questions_stem = args.questions_path.stem
+    answers_filename = f"{questions_stem}_{timestamp}.json"
+    await asyncio.to_thread((output_path / answers_filename).write_text, json.dumps(grouped, indent=2))
     print(f"Done! Results: {output_path}")
 
     await retriever.close()
