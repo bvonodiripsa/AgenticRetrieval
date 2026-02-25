@@ -297,8 +297,14 @@ Final Answer:"""
 class LLMClient:
     def __init__(self):
         llm_cfg = CONFIG["llm"]
+        # Embedding config: 'embedding' section overrides 'llm' section for backward compatibility
+        embed_cfg = {**llm_cfg, **CONFIG.get("embedding", {})}
         self._use_rbac_auth = bool(llm_cfg["use_rbac_auth"])
-        self._api_key = llm_cfg["azure_openai_key"]
+        _shared_key = llm_cfg.get("azure_openai_key", "")
+        self._llm_api_key = str(llm_cfg.get("llm_api_key") or _shared_key or "").strip()
+        self._embed_api_key = str(embed_cfg.get("embed_api_key") or _shared_key or "").strip()
+        # Keep for backward compatibility
+        self._api_key = _shared_key
         self._token_provider = None
         if self._use_rbac_auth:
             token_scope = llm_cfg.get("token_scope")
@@ -310,14 +316,17 @@ class LLMClient:
         self._embed_http_client = None
         self._local_http_client = None
         self._cfg = llm_cfg
-        self._embed_dimensions = int(llm_cfg.get("embed_dimensions") or 0)
-        self._use_local_fallback_for_subtasks = bool(llm_cfg.get("use_local_fallback_for_subtasks", False))
-        self._local_fallback_endpoint = str(llm_cfg.get("local_fallback_endpoint", "http://localhost:11434/api/generate") or "").strip()
-        self._local_fallback_model = str(llm_cfg.get("local_fallback_model", "") or "").strip()
+        self._embed_cfg = embed_cfg
+        # Local fallback config: 'local_llm' section overrides 'llm' section for backward compatibility
+        local_cfg = {**llm_cfg, **CONFIG.get("local_llm", {})}
+        self._embed_dimensions = int(embed_cfg.get("embed_dimensions") or 0)
+        self._use_local_fallback_for_subtasks = bool(local_cfg.get("use_local_fallback_for_subtasks", False))
+        self._local_fallback_endpoint = str(local_cfg.get("local_fallback_endpoint", "http://localhost:11434/api/generate") or "").strip()
+        self._local_fallback_model = str(local_cfg.get("local_fallback_model", "") or "").strip()
         self._premium_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("premium_max_concurrency", 4))))
-        self._local_semaphore = asyncio.Semaphore(max(1, int(llm_cfg.get("local_max_concurrency", 8))))
+        self._local_semaphore = asyncio.Semaphore(max(1, int(local_cfg.get("local_max_concurrency", 8))))
         self._response_cache = LRUCache(int(llm_cfg.get("prompt_cache_size", 2048)))
-        self._embed_cache = LRUCache(int(llm_cfg.get("embed_cache_size", 4096)))
+        self._embed_cache = LRUCache(int(embed_cfg.get("embed_cache_size", 4096)))
         self._local_fallback_failure_threshold = 3
         self._local_fallback_cooldown_seconds = 120
         self._local_fallback_failures = 0
@@ -350,9 +359,9 @@ class LLMClient:
             if self._use_rbac_auth:
                 client_kwargs["azure_ad_token_provider"] = self._token_provider
             else:
-                if not self._api_key or not str(self._api_key).strip():
-                    raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
-                client_kwargs["api_key"] = self._api_key
+                if not self._llm_api_key:
+                    raise ValueError("llm.llm_api_key (or llm.azure_openai_key) must be set when llm.use_rbac_auth is false")
+                client_kwargs["api_key"] = self._llm_api_key
             self._llm_client = AsyncAzureOpenAI(**client_kwargs)
         return self._llm_client
     
@@ -360,15 +369,15 @@ class LLMClient:
     def embed_client(self) -> AsyncAzureOpenAI:
         if not self._embed_client:
             client_kwargs = {
-                "api_version": self._cfg["api_version"],
-                "azure_endpoint": self._cfg["embed_endpoint"],
+                "api_version": self._embed_cfg["api_version"],
+                "azure_endpoint": self._embed_cfg["embed_endpoint"],
             }
             if self._use_rbac_auth:
                 client_kwargs["azure_ad_token_provider"] = self._token_provider
             else:
-                if not self._api_key or not str(self._api_key).strip():
-                    raise ValueError("llm.azure_openai_key must be set when llm.use_rbac_auth is false")
-                client_kwargs["api_key"] = self._api_key
+                if not self._embed_api_key:
+                    raise ValueError("embedding.embed_api_key (or llm.azure_openai_key) must be set when use_rbac_auth is false")
+                client_kwargs["api_key"] = self._embed_api_key
             self._embed_client = AsyncAzureOpenAI(**client_kwargs)
         return self._embed_client
     
@@ -668,14 +677,14 @@ class LLMClient:
         cached = self._embed_cache.get(text)
         if isinstance(cached, list):
             return list(cached)
-        embed_endpoint = str(self._cfg.get("embed_endpoint", "")).strip()
+        embed_endpoint = str(self._embed_cfg.get("embed_endpoint", "")).strip()
         if embed_endpoint.endswith("/api/embeddings"):
             try:
                 if self._embed_http_client is None:
                     self._embed_http_client = httpx.AsyncClient(timeout=60)
                 response = await self._embed_http_client.post(
                     embed_endpoint,
-                    json={"model": self._cfg["embed_model"], "prompt": text},
+                    json={"model": self._embed_cfg["embed_model"], "prompt": text},
                     headers={"Content-Type": "application/json"},
                 )
                 response.raise_for_status()
@@ -701,7 +710,7 @@ class LLMClient:
                 raise RuntimeError(f"Invalid JSON response from embedding endpoint {embed_endpoint}: {e}") from e
 
         t = _ck("embed – start")
-        result = await self.embed_client.embeddings.create(input=[text], model=self._cfg["embed_model"])
+        result = await self.embed_client.embeddings.create(input=[text], model=self._embed_cfg["embed_model"])
         _ck("embed – done", t)
         normalized = self._normalize_embedding(result.data[0].embedding)
         self._embed_cache.set(text, normalized)
@@ -834,7 +843,7 @@ class CombinedRetriever:
         self._db = None
         self._containers: dict[str, Any] = {}
         self._llm = None
-        self._expected_vector_dim = int(CONFIG.get("llm", {}).get("embed_dimensions") or 0)
+        self._expected_vector_dim = int((CONFIG.get("embedding") or CONFIG.get("llm", {})).get("embed_dimensions") or 0)
         self._credential = None
         self._retrieve_cache = LRUCache(int(CONFIG.get("retrieval", {}).get("cache_size", 2000)))
         self._sources = self._normalize_sources(retrieval_sources, fulltext_k_override)
