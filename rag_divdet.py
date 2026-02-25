@@ -1259,13 +1259,13 @@ class DecomposedRAGPipeline:
 # MAIN
 # =============================================================================
 
-def load_questions(path: Path) -> list[Question]:
-    questions = []
+def load_questions(path: Path) -> dict[str, list[Question]]:
+    questions: dict[str, list[Question]] = {}
     for f in path.glob("*.json"):
         if f.stem.startswith("_") or f.stem.endswith("_test_query"):
             continue
         data = json.loads(f.read_text(encoding="utf-8-sig"))
-        questions.extend(Question(q["question_id"], q["question_text"], f.stem, q.get("answer")) for q in data)
+        questions[f.stem] = [Question(q["question_id"], q["question_text"], f.stem, q.get("answer")) for q in data]
     return questions
 
 async def main_async():
@@ -1326,10 +1326,12 @@ async def main_async():
         args.subq_max_concurrency,
     )
     
-    questions = load_questions(args.questions_path)
+    questions_by_file = load_questions(args.questions_path)
+    # Flatten to a list for processing while keeping per-file association via q.group
+    all_questions: list[Question] = [q for qs in questions_by_file.values() for q in qs]
     if args.max_questions:
-        questions = questions[:args.max_questions]
-    print(f"Processing {len(questions)} questions")
+        all_questions = all_questions[:args.max_questions]
+    print(f"Processing {len(all_questions)} questions")
     
     div_suffix = f"_div{args.k_diverse}" if args.k_diverse > 0 else ""
     output_path = args.output_root / f"k{total_k}_ft{total_fulltext_k}_vec{total_vector_k}{div_suffix}"
@@ -1356,8 +1358,8 @@ async def main_async():
         async with semaphore:
             return await process(q)
 
-    tasks = [asyncio.create_task(bounded_process(q)) for q in questions]
-    with tqdm(total=len(questions)) as pbar:
+    tasks = [asyncio.create_task(bounded_process(q)) for q in all_questions]
+    with tqdm(total=len(all_questions)) as pbar:
         for task in asyncio.as_completed(tasks):
             try:
                 results.append(await task)
@@ -1369,12 +1371,12 @@ async def main_async():
     # Save final results - one answer file per input questions file
     llm_model = CONFIG["llm"]["llm_model"]
     embed_model = CONFIG["llm"]["embed_model"]
-    grouped: dict[str, list] = {}
+    results_by_file: dict[str, list] = {stem: [] for stem in questions_by_file}
     for r in results:
-        group = r.get("group", "default")
-        if group not in grouped:
-            grouped[group] = []
-        grouped[group].append({
+        source_stem = r.get("group", "default")
+        if source_stem not in results_by_file:
+            results_by_file[source_stem] = []
+        results_by_file[source_stem].append({
             "question_id": r["question_id"],
             "question_text": r["question_text"],
             "answer": r["final_answer"],
@@ -1384,7 +1386,7 @@ async def main_async():
         })
     # Single timestamp shared across all output files so they are identifiable as one run
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    for source_stem, answers in grouped.items():
+    for source_stem, answers in results_by_file.items():
         answers_filename = f"{source_stem}_{timestamp}.json"
         await asyncio.to_thread((output_path / answers_filename).write_text, json.dumps(answers, indent=2))
     print(f"Done! Results: {output_path}")
