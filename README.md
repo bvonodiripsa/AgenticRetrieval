@@ -103,7 +103,28 @@ python cosmos_db_upload.py --folder /path/to/documents
 
 ### 3) Run retrieval and generate answers
 
-Run:
+Before running retrieval, prepare your questions file(s).
+
+The repository includes a sample file at `data/questions-answers.json` with this structure:
+
+```json
+[
+  {
+    "question_id": "1",
+    "question_text": "Your question here",
+    "answer": "Ground-truth answer here"
+  }
+]
+```
+
+How to use it:
+
+- Keep the same JSON array structure and field names (`question_id`, `question_text`, `answer`).
+- Replace `question_text` values with questions your own dataset should be able to answer.
+- Replace `answer` values with your own ground-truth answers (the expected/correct answers you define for evaluation).
+- Place your `.json` file(s) in the folder configured by `paths.questions_path`.
+
+Then run:
 
 ```bash
 python rag_divdet.py
