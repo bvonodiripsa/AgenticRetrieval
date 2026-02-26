@@ -61,6 +61,7 @@ Each entry in `cosmos.sources` is configured independently and includes:
 - `id`
 - `container_name`
 - `partition_key_path`
+- `embedding_field` (document field that stores embedding vectors, e.g. `e`)
 - `documents_root`
 - `embedding_text_fields`
 - `retrieval.vector_k`
@@ -160,6 +161,7 @@ Outputs are written to:
 - `out/k.../questions_with_answers.json` (final grouped answers)
 
 ## Useful runtime overrides
+
 - `--k-diverse`
 - `--eta`
 - `--rescale-power`
@@ -180,7 +182,7 @@ python rag_divdet.py --max-questions 1 --timing
 
 Each line has the form:
 
-```
+```text
   [TIMING] <label>: +<step_elapsed>s  (total <since_start>s)
 ```
 
@@ -220,3 +222,7 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 - **No questions processed / empty output**
   - Confirm `paths.questions_path` points to a directory containing `.json` question files.
   - Confirm `paths.output_root` is writable.
+
+- **Config error: `cosmos.sources` missing/empty**
+  - Both upload and retrieval now fail fast when `cosmos.sources` is not a non-empty list.
+  - Add at least one source entry under `cosmos.sources` with required properties.

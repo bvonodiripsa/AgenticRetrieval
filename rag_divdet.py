@@ -746,35 +746,18 @@ def _as_list_of_strings(value: Any) -> list[str]:
     return []
 
 
-def _legacy_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
-    retrieval_cfg = config.get("retrieval", {})
-    cosmos_cfg = config.get("cosmos", {})
-    k_fulltext_legacy = int(retrieval_cfg.get("k_fulltext", 0) or 0)
-    return [
-        {
-            "id": "structured",
-            "container_name": cosmos_cfg.get("structured_container"),
-            "partition_key_path": cosmos_cfg.get("structured_partition_key_path"),
-            "vector_k": int(retrieval_cfg.get("k_structured", 0) or 0),
-            "fulltext_k": k_fulltext_legacy,
-            "fulltext_fields": ["designation"],
-        },
-        {
-            "id": "unstructured",
-            "container_name": cosmos_cfg.get("unstructured_container"),
-            "partition_key_path": cosmos_cfg.get("unstructured_partition_key_path"),
-            "vector_k": int(retrieval_cfg.get("k_unstructured", 0) or 0),
-            "fulltext_k": 0,
-            "fulltext_fields": [],
-        },
-    ]
-
-
-def _build_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
+def _get_source_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     cosmos_cfg = config.get("cosmos", {})
     configured_sources = cosmos_cfg.get("sources")
-    if not isinstance(configured_sources, list) or not configured_sources:
-        return _legacy_retrieval_sources(config)
+    if not isinstance(configured_sources, list):
+        raise ValueError(
+            "Invalid config: cosmos.sources must be a list with at least one source entry "
+            "(container_name, retrieval settings, etc.)."
+        )
+    if not configured_sources:
+        raise ValueError(
+            "Invalid config: cosmos.sources is empty. Add at least one source entry under cosmos.sources."
+        )
 
     normalized_sources: list[dict[str, Any]] = []
     for idx, source in enumerate(configured_sources, start=1):
@@ -786,6 +769,7 @@ def _build_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": source_id,
                 "container_name": source.get("container_name"),
                 "partition_key_path": source.get("partition_key_path"),
+                "embedding_field": str(source.get("embedding_field") or "e").strip(),
                 "vector_k": int(retrieval_cfg.get("vector_k", 0) or 0),
                 "fulltext_k": int(retrieval_cfg.get("fulltext_k", 0) or 0),
                 "fulltext_fields": _as_list_of_strings(retrieval_cfg.get("fulltext_fields")),
@@ -794,7 +778,7 @@ def _build_retrieval_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized_sources
 
 
-RETRIEVAL_SOURCES = _build_retrieval_sources(CONFIG)
+RETRIEVAL_SOURCES = _get_source_config(CONFIG)
 
 # Comprehensive BM25 stopwords list
 STOPWORDS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "a's", "able", "about", "above", "according", "accordingly", "across", "actually", "after", "afterwards", "again", "against", "ain't", "all", "allow", "allows", "almost", "alone", "along", "already", "also", "although", "always", "am", "among", "amongst", "an", "and", "another", "any", "anybody", "anyhow", "anyone", "anything", "anyway", "anyways", "anywhere", "apart", "appear", "appreciate", "appropriate", "are", "aren't", "around", "as", "aside", "ask", "asking", "associated", "at", "available", "away", "awfully", "b", "be", "became", "because", "become", "becomes", "becoming", "been", "before", "beforehand", "behind", "being", "believe", "below", "beside", "besides", "best", "better", "between", "beyond", "both", "brief", "but", "by", "c", "c'mon", "c's", "came", "can", "can't", "cannot", "cant", "cause", "causes", "certain", "certainly", "changes", "clearly", "co", "com", "come", "comes", "concerning", "consequently", "consider", "considering", "contain", "containing", "contains", "corresponding", "could", "couldn't", "course", "currently", "d", "definitely", "described", "despite", "did", "didn't", "different", "do", "does", "doesn't", "doing", "don", "don't", "done", "down", "downwards", "during", "e", "each", "edu", "eg", "eight", "either", "else", "elsewhere", "enough", "entirely", "especially", "et", "etc", "even", "ever", "every", "everybody", "everyone", "everything", "everywhere", "ex", "exactly", "example", "except", "f", "far", "few", "fifth", "first", "five", "followed", "following", "follows", "for", "former", "formerly", "forth", "four", "from", "further", "furthermore", "g", "get", "gets", "getting", "given", "gives", "go", "goes", "going", "gone", "got", "gotten", "greetings", "h", "had", "hadn't", "happens", "hardly", "has", "hasn't", "have", "haven't", "having", "he", "he's", "hello", "help", "hence", "her", "here", "here's", "hereafter", "hereby", "herein", "hereupon", "hers", "herself", "hi", "him", "himself", "his", "hither", "hopefully", "how", "howbeit", "however", "i", "i'd", "i'll", "i'm", "i've", "ie", "if", "ignored", "immediate", "in", "inasmuch", "inc", "indeed", "indicate", "indicated", "indicates", "inner", "insofar", "instead", "into", "inward", "is", "isn't", "it", "it'd", "it'll", "it's", "its", "itself", "j", "just", "k", "keep", "keeps", "kept", "know", "known", "knows", "l", "last", "lately", "later", "latter", "latterly", "least", "less", "lest", "let", "let's", "like", "liked", "likely", "little", "ll", "look", "looking", "looks", "ltd", "m", "mainly", "make", "many", "may", "maybe", "me", "mean", "meanwhile", "merely", "might", "more", "moreover", "most", "mostly", "mr", "mrs", "ms", "much", "must", "my", "myself", "n", "name", "namely", "nd", "near", "nearly", "necessary", "need", "needs", "neither", "never", "nevertheless", "new", "next", "nine", "no", "nobody", "non", "none", "noone", "nor", "normally", "not", "nothing", "novel", "now", "nowhere", "o", "obviously", "of", "off", "often", "oh", "ok", "okay", "old", "on", "once", "one", "ones", "only", "onto", "or", "other", "others", "otherwise", "ought", "our", "ours", "ourselves", "out", "outside", "over", "overall", "own", "p", "particular", "particularly", "per", "perhaps", "placed", "please", "plus", "possible", "presumably", "probably", "provides", "q", "que", "quite", "qv", "r", "rather", "rd", "re", "really", "reasonably", "regarding", "regardless", "regards", "relatively", "respectively", "right", "s", "said", "same", "saw", "say", "saying", "says", "second", "secondly", "see", "seeing", "seem", "seemed", "seeming", "seems", "seen", "self", "selves", "sensible", "sent", "serious", "seriously", "seven", "several", "shall", "she", "should", "shouldn't", "since", "six", "so", "some", "somebody", "somehow", "someone", "something", "sometime", "sometimes", "somewhat", "somewhere", "soon", "sorry", "specified", "specify", "specifying", "still", "sub", "such", "sup", "sure", "t", "t's", "take", "taken", "tell", "tends", "th", "than", "thank", "thanks", "thanx", "that", "that's", "thats", "the", "their", "theirs", "them", "themselves", "then", "thence", "there", "there's", "thereafter", "thereby", "therefore", "therein", "theres", "thereupon", "these", "they", "they'd", "they'll", "they're", "they've", "think", "third", "this", "thorough", "thoroughly", "those", "though", "three", "through", "throughout", "thru", "thus", "to", "together", "too", "took", "toward", "towards", "tried", "tries", "truly", "try", "trying", "twice", "two", "u", "un", "under", "unfortunately", "unless", "unlikely", "until", "unto", "up", "upon", "us", "use", "used", "useful", "uses", "using", "usually", "v", "value", "various", "ve", "very", "via", "viz", "vs", "w", "want", "wants", "was", "wasn't", "way", "we", "we'd", "we'll", "we're", "we've", "welcome", "well", "went", "were", "weren't", "what", "what's", "whatever", "when", "whence", "whenever", "where", "where's", "whereafter", "whereas", "whereby", "wherein", "whereupon", "wherever", "whether", "which", "while", "whither", "who", "who's", "whoever", "whole", "whom", "whose", "why", "will", "willing", "wish", "with", "within", "without", "won't", "wonder", "would", "wouldn't", "x", "y", "yes", "yet", "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves", "z", "zero"}
@@ -881,6 +865,9 @@ class CombinedRetriever:
             fulltext_k = int(source.get("fulltext_k", 0) or 0)
             if fulltext_k_override is not None:
                 fulltext_k = int(fulltext_k_override)
+            embedding_field = str(source.get("embedding_field") or "e").strip()
+            if not self._is_safe_field_path(embedding_field):
+                embedding_field = "e"
             fulltext_fields = [
                 field for field in _as_list_of_strings(source.get("fulltext_fields")) if self._is_safe_field_path(field)
             ]
@@ -889,6 +876,7 @@ class CombinedRetriever:
                     "id": source_id,
                     "container_name": container_name,
                     "partition_key_path": str(source.get("partition_key_path") or "").strip(),
+                    "embedding_field": embedding_field,
                     "vector_k": max(0, vector_k),
                     "fulltext_k": max(0, fulltext_k),
                     "fulltext_fields": fulltext_fields,
@@ -954,20 +942,36 @@ class CombinedRetriever:
             print(f"Fulltext error ({container.id}): {e}")
             return []
 
-    async def _vector_search(self, container, query_emb: list[float], top_k: int, query_text: str = "") -> list[dict]:
+    async def _vector_search(
+        self,
+        container,
+        embedding_field: str,
+        query_emb: list[float],
+        top_k: int,
+        query_text: str = "",
+    ) -> list[dict]:
         if top_k <= 0:
             return []
+        vector_field = str(embedding_field or "e").strip()
+        if not self._is_safe_field_path(vector_field):
+            raise ValueError(f"Unsafe embedding field path: {vector_field!r}")
         adjusted_emb = [float(x) for x in query_emb]
         if self._expected_vector_dim > 0:
             if len(adjusted_emb) > self._expected_vector_dim:
                 adjusted_emb = adjusted_emb[:self._expected_vector_dim]
             elif len(adjusted_emb) < self._expected_vector_dim:
                 adjusted_emb = adjusted_emb + [0.0] * (self._expected_vector_dim - len(adjusted_emb))
-        sql = "SELECT TOP @k c, VectorDistance(c.e, @emb) AS score FROM c ORDER BY VectorDistance(c.e, @emb)"
+        sql = (
+            f"SELECT TOP @k c, VectorDistance(c.{vector_field}, @emb) AS score "
+            f"FROM c ORDER BY VectorDistance(c.{vector_field}, @emb)"
+        )
         if _TIMING:
             with _print_lock:
                 text_preview = f", text={query_text!r}" if query_text else ""
-                print(f"  [QUERY] vector SQL ({container.id}): {sql}  [@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>{text_preview}]")
+                print(
+                    f"  [QUERY] vector SQL ({container.id}): {sql}  "
+                    f"[@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>, @field={vector_field!r}{text_preview}]"
+                )
 
         t = _ck(f"vector query (top {top_k}, {container.id}) – start")
 
@@ -998,7 +1002,7 @@ class CombinedRetriever:
 
         activity_id_note = _format_activity_id_note(activity_ids)
         reason_note = _multi_activity_reason(response_meta)
-        _ck(f"vector query – done ({len(results)} results){activity_id_note}{reason_note}", t)
+        _ck(f"vector query – done ({len(results)} results, {container.id}){activity_id_note}{reason_note}", t)
         docs = []
         t_reads = time.perf_counter()
         for r in results:
@@ -1012,9 +1016,10 @@ class CombinedRetriever:
         _ck(f"vector materialize x{len(docs)} ({container.id}) – done", t_reads)
         return docs
     
-    def _format_doc(self, doc: dict, source: str) -> RetrievedChunk:
-        embedding = doc.get('e') if isinstance(doc.get('e'), list) else doc.get('embedding')
-        exclude = {'_rid', '_self', '_etag', '_attachments', '_ts', 'embedding', 'e', '_score'}
+    def _format_doc(self, doc: dict, source: str, embedding_field: str = "e") -> RetrievedChunk:
+        emb_field = str(embedding_field or "e").strip()
+        embedding = doc.get(emb_field) if isinstance(doc.get(emb_field), list) else doc.get('embedding')
+        exclude = {'_rid', '_self', '_etag', '_attachments', '_ts', 'embedding', '_score', emb_field}
         parts = []
         for k, v in doc.items():
             if k not in exclude and v:
@@ -1069,6 +1074,7 @@ class CombinedRetriever:
                 task = asyncio.create_task(
                     self._vector_search(
                         container,
+                        str(source.get("embedding_field") or "e"),
                         emb,
                         int(source.get("vector_k", 0) or 0),
                         query,
@@ -1085,7 +1091,7 @@ class CombinedRetriever:
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
-                chunks.append(self._format_doc(doc, f"{source['id']}_fulltext"))
+                chunks.append(self._format_doc(doc, f"{source['id']}_fulltext", str(source.get("embedding_field") or "e")))
 
         for info, task in vector_tasks:
             source = info["source"]
@@ -1096,7 +1102,7 @@ class CombinedRetriever:
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
-                chunks.append(self._format_doc(doc, f"{source['id']}_vector"))
+                chunks.append(self._format_doc(doc, f"{source['id']}_vector", str(source.get("embedding_field") or "e")))
         
         # Diversity selection via greedy log-det maximization
         if self.k_diverse > 0 and len(chunks) > self.k_diverse:
@@ -1379,7 +1385,7 @@ async def main_async():
     
     # Save final results - one answer file per input questions file
     llm_model = CONFIG["llm"]["llm_model"]
-    embed_model = CONFIG["llm"]["embed_model"]
+    embed_model = (CONFIG.get("embedding") or CONFIG.get("llm", {})).get("embed_model", "")
     results_by_file: dict[str, list] = {stem: [] for stem in questions_by_file}
     for r in results:
         source_stem = r.get("group", "default")

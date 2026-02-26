@@ -10,7 +10,8 @@ LATEST_LOG = OUT_DIR / "timing_5q_latest.log"
 TABLE_PATH = OUT_DIR / "timing_5q_compare_table.tsv"
 
 TIMING_RE = re.compile(r"\[TIMING\]\s+(.*?):\s+\+([0-9]*\.?[0-9]+)s")
-VEC_DONE_RE = re.compile(r"vector query – done \((\d+) results\)")
+VEC_DONE_RE = re.compile(r"vector query – done \((\d+) results(?:,\s*([^)]+))?\)")
+MAT_DONE_RE = re.compile(r"vector materialize x\d+ \(([^)]+)\) – done")
 
 
 def run_timed_rag() -> str:
@@ -33,10 +34,10 @@ def parse_timings(text: str):
     data = {
         "retrieve_total": [],
         "fulltext_done": [],
-        "vector_data_done": [],
-        "vector_uns_done": [],
-        "mat_data": [],
-        "mat_uns": [],
+        "vector_done": [],
+        "mat_done": [],
+        "vector_by_container": {},
+        "mat_by_container": {},
         "llm_subq": [],
         "llm_synth": [],
         "llm_prelim": [],
@@ -60,15 +61,15 @@ def parse_timings(text: str):
         elif label.startswith("vector query – done"):
             vm = VEC_DONE_RE.search(label)
             if vm:
-                results_n = int(vm.group(1))
-                if results_n == 65:
-                    data["vector_uns_done"].append(value)
-                else:
-                    data["vector_data_done"].append(value)
-        elif label.startswith("vector materialize") and "(data)" in label:
-            data["mat_data"].append(value)
-        elif label.startswith("vector materialize") and "(unsdata)" in label:
-            data["mat_uns"].append(value)
+                data["vector_done"].append(value)
+                container = (vm.group(2) or "unknown").strip()
+                data["vector_by_container"].setdefault(container, []).append(value)
+        elif label.startswith("vector materialize"):
+            data["mat_done"].append(value)
+            mm = MAT_DONE_RE.search(label)
+            if mm:
+                container = (mm.group(1) or "unknown").strip()
+                data["mat_by_container"].setdefault(container, []).append(value)
         elif label.startswith("LLM sub-Q answer – done"):
             data["llm_subq"].append(value)
         elif label.startswith("LLM synthesis – done"):
@@ -149,12 +150,19 @@ def build_metric_values(data):
     values["retrieve() TOTAL – under sub-Q contention"] = fmt_range(contention_range(data["retrieve_total"], 5))
     values["Fulltext query – single"] = fmt_single(first_wave_mean(data["fulltext_done"], 5))
     values["Fulltext query – under contention (sub-Q parallel)"] = fmt_range(contention_range(data["fulltext_done"], 5))
-    values["data vector query – single"] = fmt_single(first_wave_mean(data["vector_data_done"], 5))
-    values["data vector query – under contention"] = fmt_range(contention_range(data["vector_data_done"], 5))
-    values["unsdata vector query – single"] = fmt_single(first_wave_mean(data["vector_uns_done"], 5))
-    values["unsdata vector query – under contention"] = fmt_range(contention_range(data["vector_uns_done"], 5))
-    values["vector materialize/read stage (data)"] = fmt_range(full_range(data["mat_data"]))
-    values["vector materialize/read stage (unsdata)"] = fmt_range(full_range(data["mat_uns"]))
+    values["Vector query – single (all sources)"] = fmt_single(first_wave_mean(data["vector_done"], 5))
+    values["Vector query – under contention (all sources)"] = fmt_range(contention_range(data["vector_done"], 5))
+    values["Vector materialize/read stage (all sources)"] = fmt_range(full_range(data["mat_done"]))
+
+    for container in sorted(data["vector_by_container"]):
+        vals = data["vector_by_container"][container]
+        values[f"Vector query – single ({container})"] = fmt_single(first_wave_mean(vals, 5))
+        values[f"Vector query – under contention ({container})"] = fmt_range(contention_range(vals, 5))
+
+    for container in sorted(data["mat_by_container"]):
+        vals = data["mat_by_container"][container]
+        values[f"Vector materialize/read stage ({container})"] = fmt_range(full_range(vals))
+
     values["LLM sub-Q answer"] = fmt_range(full_range(data["llm_subq"]))
     values["LLM synthesis"] = fmt_single(mean(data["llm_synth"]))
     values["LLM preliminary"] = fmt_single(mean(data["llm_prelim"]))
