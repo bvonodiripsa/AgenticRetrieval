@@ -1,14 +1,14 @@
 """
 Create Synthetic Cosmos DB Collections
 
-This script creates a Cosmos DB database and two small synthetic collections
-populated with autoscale throughput for use in tests.
+This script creates a Cosmos DB database and two small collections
+populated from JSONL sources in the repository data folder.
 
 Collection 1: "articles"
-  Properties: title, author, category, body  (all full-text indexed)
+  Properties: title, author, category, body (all full-text indexed)
 
 Collection 2: "products"
-  Properties: name, brand, description, features  (all full-text indexed)
+  Properties: name, brand, description, features (all full-text indexed)
 
 Both collections have a vector embedding property "e" (float32, 1024-dim,
 cosine, diskANN) whose value is generated from the concatenation of all four
@@ -23,6 +23,7 @@ repository root, following the same pattern as cosmos_db_upload.py.
 """
 
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -102,204 +103,115 @@ AUTOSCALE_MAX_THROUGHPUT = 1000
 #   name            – Cosmos DB container name
 #   partition_key   – partition key path
 #   text_fields     – the four text properties (also full-text indexed)
-#   documents       – small synthetic dataset
+#   documents       – loaded from JSONL files in data/
 
+DATA_DIR = _REPO_ROOT / "data"
 COLLECTION_SPECS: list[dict[str, Any]] = [
     {
         "name": "articles",
         "partition_key": "/pk",
         "text_fields": ["title", "author", "category", "body"],
-        "documents": [
-            {
-                "pk": "article-1",
-                "title": "Advances in Quantum Computing",
-                "author": "Alice Nguyen",
-                "category": "Technology",
-                "body": (
-                    "Quantum computing leverages quantum mechanical phenomena such as "
-                    "superposition and entanglement to perform computations. Recent "
-                    "breakthroughs have demonstrated error-corrected logical qubits."
-                ),
-            },
-            {
-                "pk": "article-2",
-                "title": "Climate Change and Renewable Energy",
-                "author": "Bob Martinez",
-                "category": "Environment",
-                "body": (
-                    "Transitioning to renewable energy sources is critical for mitigating "
-                    "climate change. Solar and wind power capacity has grown exponentially "
-                    "over the past decade, driven by falling costs and policy incentives."
-                ),
-            },
-            {
-                "pk": "article-3",
-                "title": "The Future of Artificial Intelligence",
-                "author": "Carol Smith",
-                "category": "Technology",
-                "body": (
-                    "Large language models and multimodal AI systems are reshaping how "
-                    "software is built. Researchers are exploring alignment, safety, and "
-                    "interpretability as AI capabilities continue to expand rapidly."
-                ),
-            },
-            {
-                "pk": "article-4",
-                "title": "Deep-Sea Exploration Discoveries",
-                "author": "David Lee",
-                "category": "Science",
-                "body": (
-                    "Recent expeditions to the Mariana Trench have uncovered previously "
-                    "unknown species. Advanced underwater robotics enable scientists to "
-                    "study ecosystems under extreme pressure and darkness."
-                ),
-            },
-            {
-                "pk": "article-5",
-                "title": "Urban Farming and Food Security",
-                "author": "Eva Chen",
-                "category": "Agriculture",
-                "body": (
-                    "Vertical farming and hydroponics allow crops to be grown in urban "
-                    "environments with minimal water use. These methods could help ensure "
-                    "food security as global population continues to grow."
-                ),
-            },
-            {
-                "pk": "article-6",
-                "title": "Breakthroughs in Gene Therapy",
-                "author": "Frank Osei",
-                "category": "Medicine",
-                "body": (
-                    "CRISPR-based gene therapies have entered clinical trials for several "
-                    "genetic disorders. Early results show promise for conditions like "
-                    "sickle-cell disease and certain inherited blindness syndromes."
-                ),
-            },
-            {
-                "pk": "article-7",
-                "title": "Space Tourism: The Next Frontier",
-                "author": "Grace Kim",
-                "category": "Space",
-                "body": (
-                    "Commercial space companies are making suborbital and orbital tourism "
-                    "a reality. Costs are expected to decline as reusable rockets mature "
-                    "and competition in the launch market intensifies."
-                ),
-            },
-            {
-                "pk": "article-8",
-                "title": "Blockchain Beyond Cryptocurrency",
-                "author": "Hiro Tanaka",
-                "category": "Technology",
-                "body": (
-                    "Distributed ledger technology is being applied to supply chain "
-                    "management, healthcare records, and digital identity systems. Smart "
-                    "contracts automate complex multi-party agreements without intermediaries."
-                ),
-            },
-            {
-                "pk": "article-9",
-                "title": "The Psychology of Decision Making",
-                "author": "Iris Patel",
-                "category": "Psychology",
-                "body": (
-                    "Cognitive biases influence how people make choices under uncertainty. "
-                    "Behavioral economics integrates psychological insights with economic "
-                    "models to better predict and guide human decision behavior."
-                ),
-            },
-            {
-                "pk": "article-10",
-                "title": "Ancient Roman Engineering Marvels",
-                "author": "James Rivera",
-                "category": "History",
-                "body": (
-                    "Roman aqueducts transported water hundreds of kilometers using only "
-                    "gravity. The engineering principles behind arches and concrete "
-                    "construction enabled structures that endure two millennia later."
-                ),
-            },
-        ],
     },
     {
         "name": "products",
         "partition_key": "/pk",
         "text_fields": ["name", "brand", "description", "features"],
-        "documents": [
-            {
-                "pk": "product-1",
-                "name": "UltraComfort Ergonomic Chair",
-                "brand": "ErgoTech",
-                "description": "Premium office chair designed for all-day comfort with lumbar support.",
-                "features": "Adjustable armrests, breathable mesh back, tilt tension control, 5-year warranty",
-            },
-            {
-                "pk": "product-2",
-                "name": "ProMax Wireless Headphones",
-                "brand": "SoundWave",
-                "description": "Over-ear noise-cancelling headphones with 40-hour battery life.",
-                "features": "Active noise cancellation, Bluetooth 5.3, foldable design, USB-C charging",
-            },
-            {
-                "pk": "product-3",
-                "name": "SmartHome Hub 3000",
-                "brand": "NexusTech",
-                "description": "Central controller for all your smart home devices with voice assistant support.",
-                "features": "Works with Alexa and Google Home, Zigbee/Z-Wave/Wi-Fi, touchscreen display",
-            },
-            {
-                "pk": "product-4",
-                "name": "TrailBlazer Hiking Boots",
-                "brand": "Summit Gear",
-                "description": "Waterproof leather hiking boots with superior ankle support.",
-                "features": "Gore-Tex lining, Vibram outsole, full-grain leather, wide toe box option",
-            },
-            {
-                "pk": "product-5",
-                "name": "AquaPure Water Filter Pitcher",
-                "brand": "ClearFlow",
-                "description": "7-stage filtration pitcher that removes 99% of contaminants.",
-                "features": "NSF certified, BPA-free, 10-cup capacity, filter life indicator",
-            },
-            {
-                "pk": "product-6",
-                "name": "SwiftCharge 65W GaN Charger",
-                "brand": "VoltEdge",
-                "description": "Compact gallium nitride charger with three ports for fast charging.",
-                "features": "3 USB-C + 1 USB-A ports, foldable prongs, travel-ready size, PD 3.0",
-            },
-            {
-                "pk": "product-7",
-                "name": "FocusLens 4K Webcam",
-                "brand": "PixelView",
-                "description": "Ultra-HD webcam with AI auto-framing for professional video calls.",
-                "features": "4K 30fps or 1080p 60fps, low-light correction, dual stereo microphones",
-            },
-            {
-                "pk": "product-8",
-                "name": "NightSky Pro Telescope",
-                "brand": "AstroVision",
-                "description": "Computerized telescope with 90,000-object database for stargazers.",
-                "features": "5-inch aperture, GoTo mount, smartphone adapter, carry case included",
-            },
-            {
-                "pk": "product-9",
-                "name": "ZenBreath Air Purifier",
-                "brand": "CleanAir Co.",
-                "description": "HEPA air purifier covering up to 500 sq ft with real-time air quality display.",
-                "features": "True HEPA H13 filter, activated carbon layer, whisper-quiet mode, auto mode",
-            },
-            {
-                "pk": "product-10",
-                "name": "PowerPedal Stationary Bike",
-                "brand": "FitCycle",
-                "description": "Magnetic resistance indoor cycling bike with 32 resistance levels.",
-                "features": "Quiet belt drive, adjustable seat and handlebars, built-in Bluetooth, LCD display",
-            },
-        ],
     },
 ]
+
+
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _extract_text_values(record: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    excluded = {"id", "pk", "e", "_rid", "_self", "_etag", "_attachments", "_ts"}
+    for key, value in record.items():
+        if key in excluded:
+            continue
+        text = _to_text(value)
+        if text:
+            values.append(text)
+    if not values:
+        values.append(json.dumps(record, ensure_ascii=False))
+    return values
+
+
+def _discover_jsonl_sources() -> list[Path]:
+    if not DATA_DIR.is_dir():
+        raise ValueError(f"Data directory does not exist: {DATA_DIR}")
+    sources = sorted(DATA_DIR.glob("*.jsonl"))
+    if len(sources) != len(COLLECTION_SPECS):
+        raise ValueError(
+            f"Expected {len(COLLECTION_SPECS)} JSONL source files in {DATA_DIR}, found {len(sources)}."
+        )
+    return sources
+
+
+def _load_documents_from_jsonl(
+    source_path: Path,
+    text_fields: list[str],
+    pk_prefix: str,
+) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    padded_rows = 0
+    with source_path.open("r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, start=1):
+            payload = line.strip()
+            if not payload:
+                continue
+            try:
+                record = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSONL in {source_path} at line {line_num}: {exc}"
+                ) from exc
+
+            if not isinstance(record, dict):
+                continue
+
+            text_values = _extract_text_values(record)
+            source_id = record.get("id") or record.get("pk") or hashlib.sha1(
+                payload.encode("utf-8")
+            ).hexdigest()
+            safe_source_id = str(source_id).replace("/", "-").replace(" ", "-")
+            mapped: dict[str, Any] = {"pk": f"{pk_prefix}-{safe_source_id}"}
+            if len(text_values) < len(text_fields):
+                padded_rows += 1
+            for idx, field in enumerate(text_fields):
+                mapped[field] = text_values[idx] if idx < len(text_values) else ""
+            documents.append(mapped)
+
+    if not documents:
+        raise ValueError(f"No JSON objects found in {source_path}.")
+    if padded_rows:
+        print(
+            f"⚠ {source_path.name}: {padded_rows} row(s) had fewer than {len(text_fields)} text values and were padded."
+        )
+    return documents
+
+
+def _build_collection_specs_with_documents() -> list[dict[str, Any]]:
+    source_files = _discover_jsonl_sources()
+    specs: list[dict[str, Any]] = []
+    for idx, spec in enumerate(COLLECTION_SPECS):
+        source_path = source_files[idx]
+        docs = _load_documents_from_jsonl(
+            source_path=source_path,
+            text_fields=spec["text_fields"],
+            pk_prefix=spec["name"],
+        )
+        specs.append({**spec, "source_path": str(source_path), "documents": docs})
+    return specs
 
 # ---------------------------------------------------------------------------
 # Indexing / policy helpers
@@ -580,6 +492,15 @@ async def main() -> None:
         print("❌ embedding.embed_api_key is not set in config.yaml")
         sys.exit(1)
 
+    try:
+        collection_specs = _build_collection_specs_with_documents()
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+    print("\n📚 Using JSONL sources:")
+    for spec in collection_specs:
+        print(f"  - {spec['name']}: {spec['source_path']} ({len(spec['documents'])} docs)")
+
     # -----------------------------------------------------------------------
     # Step 1: Create database and containers via management plane
     # -----------------------------------------------------------------------
@@ -590,7 +511,7 @@ async def main() -> None:
         _ensure_capabilities(sync_cred)
         mgmt = CosmosDBManagementClient(sync_cred, AZURE_SUBSCRIPTION_ID)
         _create_database(mgmt)
-        for spec in COLLECTION_SPECS:
+        for spec in collection_specs:
             print(f"\n  Processing container '{spec['name']}'…")
             _create_container(
                 mgmt,
@@ -620,7 +541,7 @@ async def main() -> None:
     try:
         database = cosmos_client.get_database_client(DATABASE_NAME)
 
-        for spec in COLLECTION_SPECS:
+        for spec in collection_specs:
             container_name: str = spec["name"]
             text_fields: list[str] = spec["text_fields"]
             documents: list[dict[str, Any]] = spec["documents"]
