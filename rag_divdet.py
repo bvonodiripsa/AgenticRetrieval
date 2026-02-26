@@ -801,7 +801,7 @@ def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
         for _ in range(k):
             best_i = int(np.argmax(scores))
             chosen.append(best_i)
-            r_norm = np.sqrt(scores[best_i])
+            r_norm = np.sqrt(max(scores[best_i], 0.0))
             if r_norm < 1e-12:
                 break
             q = R[best_i] / r_norm                # new orthonormal basis vector
