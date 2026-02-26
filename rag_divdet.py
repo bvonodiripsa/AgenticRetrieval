@@ -794,23 +794,43 @@ def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
     n = len(V)
     if k >= n:
         return list(range(n))
-    chosen, sel_vecs = [], []
-    for _ in range(k):
-        best_i, best_ld = -1, -np.inf
-        for i in range(n):
-            if i in chosen:
-                continue
-            test = np.vstack(sel_vecs + [V[i]]) if sel_vecs else V[i:i+1]
-            gram = test @ test.T
-            if eta > 0:
-                gram += eta * np.eye(len(gram))
-            _, ld = np.linalg.slogdet(gram)
-            if ld > best_ld:
-                best_ld, best_i = ld, i
-        chosen.append(best_i)
-        sel_vecs.append(V[best_i])
+    if eta == 0.0:
+        chosen = []
+        R = V.copy()                              # residual vectors
+        scores = np.sum(R * R, axis=1)            # ||R[j]||^2
+        for _ in range(k):
+            best_i = int(np.argmax(scores))
+            chosen.append(best_i)
+            r_norm = np.sqrt(scores[best_i])
+            if r_norm < 1e-12:
+                break
+            q = R[best_i] / r_norm                # new orthonormal basis vector
+            projections = R @ q                    # q^T @ R[j] for all j
+            R -= np.outer(projections, q)          # R[j] -= q * (q^T @ R[j])
+            scores = np.sum(R * R, axis=1)
+            for idx in chosen:
+                scores[idx] = -np.inf
+    else:
+        # eta > 0: Woodbury-based incremental update
+        # B starts as (1/eta)*I, z[j] = B @ v[j], score[j] = v[j]^T @ z[j]
+        chosen = []
+        Z = V / eta                                # z[j] = (1/eta) * v[j]
+        scores = np.sum(V * Z, axis=1)             # score[j] = v[j]^T @ z[j]
+        for _ in range(k):
+            best_i = int(np.argmax(scores))
+            chosen.append(best_i)
+            u = Z[best_i].copy()
+            denom = 1.0 + scores[best_i]
+            if abs(denom) < 1e-30:
+                break
+            # v[j]^T @ u for all j
+            vtu = V @ u                            # (n,)
+            coeffs = vtu / denom                   # (n,)
+            Z -= np.outer(coeffs, u)               # z[j] -= coeff[j] * u
+            scores = np.sum(V * Z, axis=1)         # score[j] = v[j]^T @ z[j]
+            for idx in chosen:
+                scores[idx] = -np.inf
     return chosen
-
 
 class CombinedRetriever:
     def __init__(
