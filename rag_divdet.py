@@ -10,6 +10,7 @@ import os
 import re
 import time
 import threading
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -785,7 +786,15 @@ STOPWORDS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "a's", "able
 
 def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
                           eta: float = 0.0, rescale_power: float = 0.0) -> list[int]:
-    """Greedily select k indices maximizing log-det(Gram) for diversity."""
+    """Greedily select up to k indices maximizing log-det(Gram) for diversity.
+
+    Returns a list of at most k indices.  Fewer than k indices are returned when
+    the candidate vectors become nearly linearly dependent before k items are
+    selected (``eta=0``: residual norm < 1e-12; ``eta>0``: Woodbury denominator
+    |1 + score| < 1e-30).  In those cases the marginal log-det gain is
+    effectively zero, so additional selections would not improve diversity.
+    Callers must be prepared to receive fewer than k results.
+    """
     V = vectors.copy()
     if rescale_power > 0:
         sims = V @ query_vec
@@ -1148,8 +1157,15 @@ class CombinedRetriever:
                 emb = await self._llm.embed(query)
             query_vec = np.array(emb, dtype=np.float32)
             selected = greedy_log_det_select(vectors, query_vec, self.k_diverse, self.eta, self.rescale_power)
+            if len(selected) < self.k_diverse:
+                warnings.warn(
+                    f"greedy_log_det_select returned {len(selected)}/{self.k_diverse}: "
+                    "vectors are nearly linearly dependent",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             chunks = [chunks[i] for i in selected]
-            _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)})", t)
+            _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)} of {self.k_diverse} requested)", t)
 
         self._retrieve_cache.set(query, copy.deepcopy(chunks))
         
