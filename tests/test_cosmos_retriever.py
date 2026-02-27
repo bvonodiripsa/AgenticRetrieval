@@ -79,7 +79,7 @@ def test_as_list_of_strings():
 def test_timing_flag_visible_via_module():
     """Runtime mutations to rag_divdet._TIMING must be visible in cosmos_retriever."""
     import rag_divdet
-    import cosmos_retriever  # noqa: F811
+    import cosmos_retriever
 
     original = rag_divdet._TIMING
     try:
