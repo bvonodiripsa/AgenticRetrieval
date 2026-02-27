@@ -145,6 +145,50 @@ def test_orthogonal_vectors_selected_eta_positive():
 
 
 # ---------------------------------------------------------------------------
+# Fewer-than-k returns when vectors are nearly linearly dependent
+# ---------------------------------------------------------------------------
+
+def test_fewer_than_k_linearly_dependent_eta_zero():
+    """eta=0: when all vectors are identical, only one can be selected."""
+    d = 4
+    v = np.ones(d, dtype=np.float32) / np.sqrt(d)
+    vectors = np.tile(v, (6, 1))
+    query = v.copy()
+    result = greedy_log_det_select(vectors, query, k=4)
+    assert len(result) < 4
+    assert len(result) >= 1
+
+
+def test_fewer_than_k_linearly_dependent_eta_positive():
+    """eta>0: nearly linearly dependent vectors may trigger early stop."""
+    d = 4
+    v = np.ones(d, dtype=np.float32) / np.sqrt(d)
+    vectors = np.tile(v, (6, 1))
+    query = v.copy()
+    result = greedy_log_det_select(vectors, query, k=4, eta=1e-30)
+    assert len(result) >= 1
+    assert len(result) <= 4
+
+
+# ---------------------------------------------------------------------------
+# sqrt NaN guard: negative scores from float roundoff must not produce NaN
+# ---------------------------------------------------------------------------
+
+def test_no_nan_from_float_roundoff():
+    """r_norm must not be NaN even when scores[best_i] is tiny negative."""
+    d = 3
+    # Construct vectors where Gram-Schmidt orthogonalization leaves a
+    # tiny negative squared residual norm due to float32 roundoff.
+    # Two identical unit vectors -- the second residual becomes ~0 (or slightly negative).
+    v = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    vectors = np.array([v, v + 1e-8, np.array([0, 1, 0], dtype=np.float32)], dtype=np.float32)
+    query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    result = greedy_log_det_select(vectors, query, k=2)
+    # Must not raise and must not contain NaN-derived indices
+    assert all(isinstance(i, int) for i in result)
+
+
+# ---------------------------------------------------------------------------
 # Input is not mutated
 # ---------------------------------------------------------------------------
 

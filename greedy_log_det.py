@@ -5,7 +5,15 @@ import numpy as np
 
 def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
                           eta: float = 0.0, rescale_power: float = 0.0) -> list[int]:
-    """Greedily select k indices maximizing log-det(Gram) for diversity."""
+    """Greedily select up to k indices maximizing log-det(Gram) for diversity.
+
+    Returns a list of at most k indices.  Fewer than k indices are returned when
+    the candidate vectors become nearly linearly dependent before k items are
+    selected (``eta=0``: residual norm < 1e-12; ``eta>0``: Woodbury denominator
+    |1 + score| < 1e-30).  In those cases the marginal log-det gain is
+    effectively zero, so additional selections would not improve diversity.
+    Callers must be prepared to receive fewer than k results.
+    """
     V = vectors.copy()
     if rescale_power > 0:
         sims = V @ query_vec
@@ -21,7 +29,7 @@ def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
         for _ in range(k):
             best_i = int(np.argmax(scores))
             chosen.append(best_i)
-            r_norm = np.sqrt(scores[best_i])
+            r_norm = np.sqrt(max(scores[best_i], 0.0))
             if r_norm < 1e-12:
                 break
             q = R[best_i] / r_norm                # new orthonormal basis vector

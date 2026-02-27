@@ -10,6 +10,7 @@ import os
 import re
 import time
 import threading
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1102,8 +1103,15 @@ class CombinedRetriever:
                 emb = await self._llm.embed(query)
             query_vec = np.array(emb, dtype=np.float32)
             selected = greedy_log_det_select(vectors, query_vec, self.k_diverse, self.eta, self.rescale_power)
+            if len(selected) < self.k_diverse:
+                warnings.warn(
+                    f"greedy_log_det_select returned {len(selected)}/{self.k_diverse}: "
+                    "vectors are nearly linearly dependent",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             chunks = [chunks[i] for i in selected]
-            _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)})", t)
+            _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)} of {self.k_diverse} requested)", t)
 
         self._retrieve_cache.set(query, copy.deepcopy(chunks))
         
