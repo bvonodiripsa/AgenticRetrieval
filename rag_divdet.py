@@ -8,6 +8,8 @@ import datetime
 import json
 import os
 import re
+import shutil
+import sys
 import time
 import threading
 from collections import OrderedDict
@@ -1420,4 +1422,49 @@ async def main_async():
     await llm.close()
 
 if __name__ == "__main__":
-    asyncio.run(main_async())
+    if "--timing" in sys.argv:
+        class _TeeStream:
+            def __init__(self, *streams):
+                self._streams = streams
+
+            def write(self, data):
+                for stream in self._streams:
+                    stream.write(data)
+                return len(data)
+
+            def flush(self):
+                for stream in self._streams:
+                    stream.flush()
+
+            def isatty(self):
+                return any(getattr(stream, "isatty", lambda: False)() for stream in self._streams)
+
+            def __getattr__(self, name):
+                return getattr(self._streams[0], name)
+
+        out_dir = Path(__file__).resolve().parent / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_log_path = out_dir / f"timing_5q_rerun_{run_stamp}.log"
+        latest_log_path = out_dir / "timing_5q_latest.log"
+
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        with run_log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+            try:
+                sys.stdout = _TeeStream(original_stdout, log_file)
+                sys.stderr = _TeeStream(original_stderr, log_file)
+                asyncio.run(main_async())
+            finally:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                finally:
+                    sys.stdout = original_stdout
+                    sys.stderr = original_stderr
+
+        shutil.copyfile(run_log_path, latest_log_path)
+        print(f"[TIMING] wrote log: {run_log_path}")
+        print(f"[TIMING] updated latest: {latest_log_path}")
+    else:
+        asyncio.run(main_async())
