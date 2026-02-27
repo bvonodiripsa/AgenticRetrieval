@@ -178,7 +178,7 @@ ANSWER FROM CONTEXT:
 [Your answer based strictly on the provided context]
 
 INFORMATION GAPS:
-[List any aspects of the question that cannot be answered from the provided context, or write "None" if the context fully answers the question]
+[List any aspects of the question that cannot be answered from the provided context]
 
 Response:"""
 
@@ -206,7 +206,7 @@ ANSWER FROM CONTEXT:
 [Your detailed answer based strictly on the provided context - be thorough and include all relevant details]
 
 INFORMATION GAPS:
-[List any aspects of the question that cannot be answered from the provided context, or write "None" if the context fully answers the question]
+[List any aspects of the question that cannot be answered from the provided context]
 
 Response:"""
 
@@ -240,7 +240,7 @@ ANSWER FROM CONTEXT:
 [Your updated answer incorporating all available information]
 
 INFORMATION GAPS:
-[List any aspects of the question that still cannot be answered, or write "None" if the question is now fully answered]
+[List any aspects of the question that still cannot be answered]
 
 Response:"""
 
@@ -267,7 +267,7 @@ Original Question: {question}
 Preliminary Answer:
 {preliminary_answer}
 
-Return your response as a JSON array of strings. Return [] if no additional information is needed.
+Return your response as a JSON array of strings.
 Example: ["What is the maximum temperature?", "What is the minimum temperature?"]
 
 Sub-questions to fill gaps:"""
