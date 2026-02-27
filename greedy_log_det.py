@@ -17,8 +17,9 @@ def greedy_log_det_select(vectors: np.ndarray, query_vec: np.ndarray, k: int,
     V = vectors.copy()
     if rescale_power > 0:
         sims = V @ query_vec
-        for i in range(len(V)):
-            V[i] *= (sims[i] ** rescale_power) if sims[i] > 0 else 0
+        # Vectorized rescaling: positive sims get sims**rescale_power, others are zeroed.
+        scales = np.where(sims > 0, sims ** rescale_power, 0.0)
+        V *= scales[:, None]
     n = len(V)
     if k >= n:
         return list(range(n))
