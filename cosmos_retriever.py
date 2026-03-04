@@ -335,7 +335,7 @@ class CombinedRetriever:
             container = self._containers.get(source["id"])
             if container is None:
                 continue
-            top_k = max(1, int(source.get("fulltext_k", 0) or 0) // k_divisor) if int(source.get("fulltext_k", 0) or 0) > 0 else 0
+            top_k = int(source.get("fulltext_k", 0) or 0) // k_divisor
             fields = source.get("fulltext_fields") or []
             if top_k <= 0 or not fields:
                 continue
@@ -356,7 +356,7 @@ class CombinedRetriever:
                 container = self._containers.get(source["id"])
                 if container is None:
                     continue
-                vec_k = max(1, int(source.get("vector_k", 0) or 0) // k_divisor) if int(source.get("vector_k", 0) or 0) > 0 else 0
+                vec_k = int(source.get("vector_k", 0) or 0) // k_divisor
                 t_vector = _ck(f"  retrieve: vector/{source['id']} – start (parallel)")
                 task = asyncio.create_task(
                     self._vector_search(
@@ -397,6 +397,7 @@ class CombinedRetriever:
             missing_chunks = [c for c in chunks if c.metadata.get('embedding') is None]
             n_missing = len(missing_chunks)
             if missing_chunks:
+                print(f"  {n_missing} chunks missing embeddings, computing now...")
                 missing_embeddings = await asyncio.gather(*(self._llm.embed(c.text) for c in missing_chunks))
                 for chunk, embedding in zip(missing_chunks, missing_embeddings):
                     chunk.metadata['embedding'] = embedding
