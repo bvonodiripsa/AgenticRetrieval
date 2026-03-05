@@ -159,144 +159,15 @@ class RoundResult:
 # PROMPTS
 # =============================================================================
 
-PRELIMINARY_PROMPT = """You are a helpful assistant that answers questions STRICTLY based on the provided context.
-
-IMPORTANT RULES:
-1. ONLY use information explicitly stated in the context below
-2. DO NOT make assumptions or infer information not directly stated
-3. DO NOT use any external knowledge
-4. If the context does not contain enough information to fully answer the question, clearly state what information IS available and what information IS MISSING
-5. Be precise and cite specific details from the context
-6. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
-
-Context Documents:
-{context}
-
-Question: {question}
-
-Provide your answer in the following format:
-
-ANSWER FROM CONTEXT:
-[Your answer based strictly on the provided context]
-
-INFORMATION GAPS:
-[List any aspects of the question that cannot be answered from the provided context]
-
-Response:"""
-
-SUBQUESTION_PROMPT = """You are a helpful assistant that answers questions STRICTLY based on the provided context.
-
-IMPORTANT RULES:
-1. ONLY use information explicitly stated in the context below
-2. DO NOT make assumptions or infer information not directly stated
-3. DO NOT use any external knowledge
-4. If the context does not contain enough information to fully answer the question, clearly state what information IS available and what information IS MISSING
-5. Be precise and cite specific details from the context
-6. Provide a COMPREHENSIVE and DETAILED answer - include all relevant information from the context
-7. Extract and include specific values, numbers, specifications, and technical details when available
-8. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
-
-Context Documents:
-{context}
-
-Question: {question}
-
-Provide a VERBOSE and COMPREHENSIVE answer that includes ALL relevant information from the context.
-Include specific details, values, and technical specifications where available.
-
-ANSWER FROM CONTEXT:
-[Your detailed answer based strictly on the provided context - be thorough and include all relevant details]
-
-INFORMATION GAPS:
-[List any aspects of the question that cannot be answered from the provided context]
-
-Response:"""
-
-REGENERATE_PROMPT = """You are a helpful assistant that synthesizes information to provide a comprehensive answer.
-
-You have:
-1. An original question
-2. A previous preliminary answer (which may have gaps)
-3. Additional information from follow-up sub-questions and their answers
-
-Your task is to generate an UPDATED and MORE COMPLETE answer by incorporating the new information from the sub-questions.
-
-IMPORTANT RULES:
-1. ONLY use information from the previous answer and the sub-question answers provided
-2. DO NOT make assumptions or add external knowledge
-3. Integrate the new information smoothly into a coherent answer
-4. If gaps still remain, clearly identify them
-5. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
-
-Original Question: {question}
-
-Previous Preliminary Answer:
-{previous_answer}
-
-Additional Information from Sub-questions:
-{sub_qa_context}
-
-Provide your updated answer in the following format:
-
-ANSWER FROM CONTEXT:
-[Your updated answer incorporating all available information]
-
-INFORMATION GAPS:
-[List any aspects of the question that still cannot be answered]
-
-Response:"""
-
-GAP_DECOMPOSE_PROMPT = """You are a helpful assistant that identifies what additional information is needed to fully answer a question.
-
-Given:
-1. An original question
-2. A preliminary answer based on initial context (which may be incomplete)
-3. The information gaps identified in that answer
-
-Generate sub-questions that will help fill these gaps and provide a complete answer.
-
-Guidelines:
-- Focus on the INFORMATION GAPS identified in the preliminary answer
-- Each sub-question should be SIMPLE and cover only ONE specific aspect
-- Each sub-question should target a single missing piece of information
-- Do NOT combine multiple aspects into one sub-question
-- Sub-questions should be self-contained and answerable independently
-- Keep sub-questions short and focused
-- Maximum {max_sub_questions} sub-questions
-
-Original Question: {question}
-
-Preliminary Answer:
-{preliminary_answer}
-
-Return your response as a JSON array of strings.
-Example: ["What is the maximum temperature?", "What is the minimum temperature?"]
-
-Sub-questions to fill gaps:"""
-
-SYNTHESIS_PROMPT = """You are a helpful assistant that synthesizes information to answer questions comprehensively.
-
-Original Question: {original_question}
-
-Preliminary Answer (from initial retrieval):
-{preliminary_answer}
-
-Sub-questions and their answers:
-{sub_qa_pairs}
-
-Based on the above information, provide a comprehensive answer to the original question.
-Synthesize the information coherently, avoid repetition, and ensure the answer directly addresses the original question.
-
-Prioritize information from the sub-question answers that fill gaps in the preliminary answer.
-
-At the end, add a summary that directly answers the question in a concise way. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
-
-Format your response as:
-[Your comprehensive answer here]
-
-SUMMARY: [Direct answer to the question]
-
-Final Answer:"""
+from prompts import (
+    PRELIMINARY_PROMPT,
+    SUBQUESTION_PROMPT,
+    REGENERATE_PROMPT,
+    GAP_DECOMPOSE_PROMPT,
+    SYNTHESIS_PROMPT,
+    EFFICIENT_REGENERATE_PROMPT,
+    EFFICIENT_SYNTHESIS_PROMPT,
+)
 
 # =============================================================================
 # LLM CLIENT
@@ -876,6 +747,130 @@ class DecomposedRAGPipeline:
             "final_answer": final
         }
 
+    async def run_efficient(self, question: str) -> dict:
+        """Pipeline variant activated by ``--efficient``.
+
+        Works like :meth:`run` but each round divides the retrieval budget
+        across the generated sub-questions: every sub-question retrieves
+        ``k / #subquestions`` texts.  The retrieved texts from all sub-questions
+        are combined (de-duplicated), and a single LLM call uses that combined
+        context to produce an updated answer **to the original question** along
+        with remaining information gaps.  Those gaps seed the next round.
+        """
+        t_run = _ck("pipeline.run_efficient – start")
+
+        # --- Step 1: initial retrieval + preliminary answer (identical to run) ---
+        t = _ck("pipeline: initial retrieve – start")
+        initial_chunks = await self.retriever.retrieve(question)
+        _ck(f"pipeline: initial retrieve – done ({len(initial_chunks)} chunks)", t)
+        initial_context = self._format_context(initial_chunks)
+        preliminary = await self.llm.complete(
+            PRELIMINARY_PROMPT.format(context=initial_context, question=question),
+            label="LLM preliminary",
+        )
+        _ck("pipeline: preliminary answer – done", t_run)
+
+        rounds_data: list[dict] = []
+        current = preliminary
+
+        for rnd in range(1, self.num_rounds + 1):
+            t_rnd = _ck(f"pipeline: efficient round {rnd} – start")
+
+            # --- Generate sub-questions from gaps in the current answer ---
+            sub_qs = await self._get_subquestions(question, current)
+            _ck(f"pipeline: round {rnd} gap-decompose – done ({len(sub_qs)} sub-Qs)", t_rnd)
+            if not sub_qs:
+                break
+
+            num_sub_qs = len(sub_qs)
+
+            # --- Retrieve k / #subquestions per sub-question (parallel, bounded) ---
+            semaphore = asyncio.Semaphore(self.subq_max_concurrency)
+
+            async def _retrieve_for_subq(sub_q: str) -> tuple[str, list[RetrievedChunk]]:
+                async with semaphore:
+                    chunks = await self.retriever.retrieve(sub_q, k_divisor=num_sub_qs)
+                    return sub_q, chunks
+
+            t = _ck(f"pipeline: round {rnd} efficient retrieve ({num_sub_qs} sub-Qs) – start")
+            subq_results = await asyncio.gather(*(_retrieve_for_subq(sq) for sq in sub_qs))
+            _ck(f"pipeline: round {rnd} efficient retrieve – done", t)
+
+            # Combine & de-duplicate retrieved chunks across all sub-questions
+            combined_chunks: list[RetrievedChunk] = []
+            seen_ids: set[tuple[str | int, str | None]] = set()
+            per_subq_info: list[dict] = []
+
+            for sub_q, chunks in subq_results:
+                subq_chunk_records: list[dict] = []
+                for c in chunks:
+                    key = (c.chunk_id, c.metadata.get("_data_source"))
+                    subq_chunk_records.append(
+                        {"chunk_id": c.chunk_id, "content": c.text,
+                         "metadata": {k: v for k, v in c.metadata.items() if k != "embedding"}}
+                    )
+                    if key not in seen_ids:
+                        seen_ids.add(key)
+                        combined_chunks.append(c)
+                per_subq_info.append({"sub_question": sub_q, "chunks_retrieved": len(chunks), "chunks": subq_chunk_records})
+
+            _ck(
+                f"pipeline: round {rnd} combined {len(combined_chunks)} unique chunks "
+                f"(from {sum(len(ch) for _, ch in subq_results)} total)",
+                t_rnd,
+            )
+
+            # --- Use combined context to regenerate answer to the ORIGINAL question ---
+            combined_context = self._format_context(combined_chunks)
+            t = _ck(f"pipeline: round {rnd} efficient regenerate – start")
+            regen = await self.llm.complete(
+                EFFICIENT_REGENERATE_PROMPT.format(
+                    question=question,
+                    previous_answer=current,
+                    context=combined_context,
+                ),
+                label=f"LLM efficient regen rnd {rnd}",
+            )
+            _ck(f"pipeline: round {rnd} efficient regenerate – done", t)
+
+            rounds_data.append({
+                "round": rnd,
+                "sub_questions": per_subq_info,
+                "combined_chunks_count": len(combined_chunks),
+                "regenerated_answer": regen,
+            })
+            current = regen
+            _ck(f"pipeline: efficient round {rnd} – TOTAL", t_rnd)
+
+        # --- Final synthesis (same pattern as run's SYNTHESIS_PROMPT) ---
+        t = _ck("pipeline: efficient synthesis – start")
+        round_answer_parts: list[str] = []
+        for rd in rounds_data:
+            rnd_num = rd.get("round", "?")
+            regen_answer = rd.get("regenerated_answer", "")
+            round_answer_parts.append(f"Round {rnd_num} Answer:\n{regen_answer}")
+        round_answers_text = "\n\n".join(round_answer_parts) or "None"
+        final = await self.llm.complete(
+            EFFICIENT_SYNTHESIS_PROMPT.format(
+                original_question=question,
+                preliminary_answer=preliminary,
+                round_answers=round_answers_text,
+            ),
+            label="LLM efficient synthesis",
+        )
+        _ck("pipeline: efficient synthesis – done", t)
+
+        _ck("pipeline.run_efficient – TOTAL", t_run)
+        return {
+            "initial_chunks": [
+                {"id": c.chunk_id, "src": c.metadata.get("_data_source"), "content": c.text}
+                for c in initial_chunks
+            ],
+            "initial_answer": preliminary,
+            "rounds": rounds_data,
+            "final_answer": final,
+        }
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -914,6 +909,7 @@ async def main_async():
     parser.add_argument("--output-root", type=Path, default=Path(CONFIG["paths"]["output_root"]))
     parser.add_argument("--timing", action="store_true", help="Print timing checkpoints for each major operation")
     parser.add_argument("--cosmos-az-login", action="store_true", help="Use 'az login' (AzureCliCredential) to authenticate to Cosmos DB")
+    parser.add_argument("--efficient", action="store_true", help="Use efficient pipeline: each round retrieves k/#subquestions per sub-question, combines results, and regenerates the answer")
     args = parser.parse_args()
 
     global _TIMING, _t0
@@ -965,7 +961,10 @@ async def main_async():
     results = []
 
     async def process(q: Question):
-        result = await pipeline.run(q.question_text)
+        if args.efficient:
+            result = await pipeline.run_efficient(q.question_text)
+        else:
+            result = await pipeline.run(q.question_text)
         result["question_id"] = q.question_id
         result["question_text"] = q.question_text
         result["group"] = q.group

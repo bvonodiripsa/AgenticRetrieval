@@ -304,12 +304,25 @@ class CombinedRetriever:
             metadata={'_data_source': source, 'embedding': embedding}
         )
     
-    async def retrieve(self, query: str) -> list[RetrievedChunk]:
+    async def retrieve(self, query: str, k_divisor: int = 1) -> list[RetrievedChunk]:
+        """Retrieve chunks for *query*.
+
+        Parameters
+        ----------
+        query : str
+            The search query.
+        k_divisor : int, optional
+            When > 1 every configured ``fulltext_k`` and ``vector_k`` is divided
+            by this value (with a floor of 1).  Used by the ``--efficient``
+            pipeline so each sub-question retrieves ``k / #subquestions`` texts.
+        """
         if self._llm is None:
             raise RuntimeError("Retriever is not initialized")
-        t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r})")
+        k_divisor = max(1, int(k_divisor))
+        t_retrieve = _ck(f"retrieve – start (q: {query[:60]!r}, k_divisor={k_divisor})")
 
-        cached = self._retrieve_cache.get(query)
+        cache_key = f"{query}|||divisor={k_divisor}"
+        cached = self._retrieve_cache.get(cache_key)
         if isinstance(cached, list):
             _ck("retrieve – cache hit", t_retrieve)
             return copy.deepcopy(cached)
@@ -322,7 +335,7 @@ class CombinedRetriever:
             container = self._containers.get(source["id"])
             if container is None:
                 continue
-            top_k = int(source.get("fulltext_k", 0) or 0)
+            top_k = int(source.get("fulltext_k", 0) or 0) // k_divisor
             fields = source.get("fulltext_fields") or []
             if top_k <= 0 or not fields:
                 continue
@@ -343,13 +356,14 @@ class CombinedRetriever:
                 container = self._containers.get(source["id"])
                 if container is None:
                     continue
+                vec_k = int(source.get("vector_k", 0) or 0) // k_divisor
                 t_vector = _ck(f"  retrieve: vector/{source['id']} – start (parallel)")
                 task = asyncio.create_task(
                     self._vector_search(
                         container,
                         str(source.get("embedding_field") or "e"),
                         emb,
-                        int(source.get("vector_k", 0) or 0),
+                        vec_k,
                         query,
                     )
                 )
@@ -383,6 +397,7 @@ class CombinedRetriever:
             missing_chunks = [c for c in chunks if c.metadata.get('embedding') is None]
             n_missing = len(missing_chunks)
             if missing_chunks:
+                print(f"  {n_missing} chunks missing embeddings, computing now...")
                 missing_embeddings = await asyncio.gather(*(self._llm.embed(c.text) for c in missing_chunks))
                 for chunk, embedding in zip(missing_chunks, missing_embeddings):
                     chunk.metadata['embedding'] = embedding
@@ -403,7 +418,7 @@ class CombinedRetriever:
             chunks = [chunks[i] for i in selected]
             _ck(f"  retrieve: greedy log-det – done (selected {len(chunks)} of {self.k_diverse} requested)", t)
 
-        self._retrieve_cache.set(query, copy.deepcopy(chunks))
+        self._retrieve_cache.set(cache_key, copy.deepcopy(chunks))
         
         _ck(f"retrieve – TOTAL ({len(chunks)} chunks returned)", t_retrieve)
         return chunks
