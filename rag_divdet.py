@@ -169,6 +169,18 @@ from prompts import (
     EFFICIENT_SYNTHESIS_PROMPT,
 )
 
+PRELIMINARY_PROMPT = CONFIG.get("pipeline", {}).get("preliminary_prefix", "") + "\n\n" + PRELIMINARY_PROMPT
+EFFICIENT_REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("subquery_prefix", "") + "\n\n" + EFFICIENT_REGENERATE_PROMPT
+SUBQUESTION_PROMPT = CONFIG.get("pipeline", {}).get("subquery_prefix", "") + "\n\n" + SUBQUESTION_PROMPT
+
+SYNTHESIS_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + SYNTHESIS_PROMPT
+EFFICIENT_REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + EFFICIENT_REGENERATE_PROMPT
+EFFICIENT_SYNTHESIS_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + EFFICIENT_SYNTHESIS_PROMPT
+GAP_DECOMPOSE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + GAP_DECOMPOSE_PROMPT
+REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + REGENERATE_PROMPT
+SUBQUESTION_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + SUBQUESTION_PROMPT
+PRELIMINARY_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + PRELIMINARY_PROMPT
+
 # =============================================================================
 # LLM CLIENT
 # =============================================================================

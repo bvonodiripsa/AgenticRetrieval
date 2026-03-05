@@ -313,7 +313,7 @@ class CombinedRetriever:
             The search query.
         k_divisor : int, optional
             When > 1 every configured ``fulltext_k`` and ``vector_k`` is divided
-            by this value (with a floor of 1).  Used by the ``--efficient``
+            by this value.  Used by the ``--efficient``
             pipeline so each sub-question retrieves ``k / #subquestions`` texts.
         """
         if self._llm is None:
