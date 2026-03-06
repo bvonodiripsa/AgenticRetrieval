@@ -169,16 +169,16 @@ from prompts import (
     EFFICIENT_SYNTHESIS_PROMPT,
 )
 
-preliminary_prefix = CONFIG.get("pipeline", {}).get("preliminary_prefix", "")
+preliminary_prefix = (str(CONFIG.get("pipeline", {}).get("preliminary_prefix")) or "").strip()
 preliminary_prefix = preliminary_prefix + "\n\n" if preliminary_prefix else ""
-subquery_prefix = CONFIG.get("pipeline", {}).get("subquery_prefix", "")
+subquery_prefix = (str(CONFIG.get("pipeline", {}).get("subquery_prefix")) or "").strip()
 subquery_prefix = subquery_prefix + "\n\n" if subquery_prefix else ""
 
 PRELIMINARY_PROMPT = preliminary_prefix + PRELIMINARY_PROMPT
 EFFICIENT_REGENERATE_PROMPT = subquery_prefix + EFFICIENT_REGENERATE_PROMPT
 SUBQUESTION_PROMPT = subquery_prefix + SUBQUESTION_PROMPT
 
-dataset_description = CONFIG.get("pipeline", {}).get("dataset_description", "")
+dataset_description = (str(CONFIG.get("pipeline", {}).get("dataset_description")) or "").strip()
 dataset_description = dataset_description + "\n\n" if dataset_description else ""
 
 SYNTHESIS_PROMPT = dataset_description + SYNTHESIS_PROMPT

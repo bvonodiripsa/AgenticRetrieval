@@ -184,7 +184,7 @@ Answers from successive retrieval rounds (each round retrieved additional contex
 {round_answers}
 
 Based on the above information, provide a comprehensive answer to the original question.
-Synthesize the information coherently, avoid repetition, and ensure the answer directly addresses the original question. Try to cover as many anspects, obtained numeric values and specific details in the answer as possible.
+Synthesize the information coherently, avoid repetition, and ensure the answer directly addresses the original question. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible.
 
 Prioritize information from later rounds as they address gaps identified in earlier answers.
 
