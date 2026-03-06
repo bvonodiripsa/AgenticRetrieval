@@ -25,8 +25,7 @@ import yaml
 
 import openai
 from azure.cosmos.aio import CosmosClient
-from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, DefaultAzureCredential
-from azure.identity import AzureCliCredential, get_bearer_token_provider
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI
 from tqdm import tqdm
@@ -179,6 +178,10 @@ class LLMClient:
         # Embedding config: 'embedding' section overrides 'llm' section for backward compatibility
         embed_cfg = {**llm_cfg, **CONFIG.get("embedding", {})}
         self._use_rbac_auth = bool(llm_cfg["use_rbac_auth"])
+        token_scope = llm_cfg.get("token_scope")
+        if not token_scope or not str(token_scope).strip():
+            token_scope = "https://cognitiveservices.azure.com/.default"
+        self._token_scope = str(token_scope).strip()
         _shared_key = llm_cfg.get("azure_openai_key", "")
         self._llm_api_key = str(llm_cfg.get("llm_api_key") or _shared_key or "").strip()
         self._embed_api_key = str(embed_cfg.get("embed_api_key") or _shared_key or "").strip()
@@ -186,10 +189,7 @@ class LLMClient:
         self._api_key = _shared_key
         self._token_provider = None
         if self._use_rbac_auth:
-            token_scope = llm_cfg.get("token_scope")
-            if not token_scope or not str(token_scope).strip():
-                token_scope = "https://cognitiveservices.azure.com/.default"
-            self._token_provider = get_bearer_token_provider(AzureCliCredential(), token_scope)
+            self._token_provider = get_bearer_token_provider(SyncDefaultAzureCredential(), self._token_scope)
         self._llm_client = None
         self._embed_client = None
         self._embed_http_client = None
@@ -217,6 +217,24 @@ class LLMClient:
         self._max_output_tokens_hint: int | None = None
         self._introspection_done = False
         self._introspection_lock = asyncio.Lock()
+
+    @staticmethod
+    def _is_key_auth_disabled_error(error: Exception) -> bool:
+        status_code = getattr(error, "status_code", None)
+        if status_code != 403:
+            return False
+        txt = str(error).lower()
+        return (
+            "authenticationtypedisabled" in txt
+            or "key based authentication is disabled" in txt
+            or "authentication type is disabled" in txt
+        )
+
+    def _switch_to_rbac_auth(self) -> None:
+        self._use_rbac_auth = True
+        self._token_provider = get_bearer_token_provider(SyncDefaultAzureCredential(), self._token_scope)
+        self._llm_client = None
+        self._embed_client = None
 
     def _normalize_embedding(self, embedding: list[float]) -> list[float]:
         if self._embed_dimensions <= 0:
@@ -481,6 +499,13 @@ class LLMClient:
                     continue
                 raise
             except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
+                if self._is_key_auth_disabled_error(e) and not self._use_rbac_auth:
+                    try:
+                        self._switch_to_rbac_auth()
+                        print("Azure OpenAI key auth is disabled for this resource; switched to Entra ID RBAC")
+                        continue
+                    except Exception as switch_err:
+                        print(f"Failed switching to Entra ID RBAC ({type(switch_err).__name__}); continuing retries")
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
                 print(f"LLMAPI error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
                 await asyncio.sleep(wait)

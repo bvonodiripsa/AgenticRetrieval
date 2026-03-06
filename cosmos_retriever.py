@@ -4,6 +4,7 @@ import asyncio
 import copy
 import os
 import re
+import sys
 import time
 import warnings
 from typing import Any
@@ -14,7 +15,6 @@ from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, De
 
 import rag_divdet as _rag
 from rag_divdet import (
-    _ck,
     _format_activity_id_note,
     _multi_activity_reason,
     CONFIG,
@@ -23,6 +23,26 @@ from rag_divdet import (
     RetrievedChunk,
 )
 from greedy_log_det import greedy_log_det_select
+
+
+def _runtime_module() -> Any:
+    main_mod = sys.modules.get("__main__")
+    if main_mod and hasattr(main_mod, "_ck"):
+        return main_mod
+    return _rag
+
+
+def _timing_enabled() -> bool:
+    return bool(getattr(_runtime_module(), "_TIMING", False))
+
+
+def _timing_lock() -> Any:
+    return getattr(_runtime_module(), "_print_lock")
+
+
+def _ck(label: str, ref: float | None = None) -> float:
+    ck_fn = getattr(_runtime_module(), "_ck")
+    return ck_fn(label, ref)
 
 # =============================================================================
 # COSMOS DB RETRIEVER
@@ -198,8 +218,8 @@ class CombinedRetriever:
 
         try:
             sql = f"SELECT TOP {top_k} * FROM c {order}"
-            if _rag._TIMING:
-                with _rag._print_lock:
+            if _timing_enabled():
+                with _timing_lock():
                     print(f"  [QUERY] fulltext SQL ({container.id}): {sql}")
 
             t = _ck(f"fulltext query (top {top_k}, {container.id}) – start")
@@ -237,8 +257,8 @@ class CombinedRetriever:
             f"SELECT TOP @k c, VectorDistance(c.{vector_field}, @emb) AS score "
             f"FROM c ORDER BY VectorDistance(c.{vector_field}, @emb)"
         )
-        if _rag._TIMING:
-            with _rag._print_lock:
+        if _timing_enabled():
+            with _timing_lock():
                 text_preview = f", text={query_text!r}" if query_text else ""
                 print(
                     f"  [QUERY] vector SQL ({container.id}): {sql}  "

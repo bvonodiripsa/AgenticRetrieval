@@ -38,7 +38,7 @@ llm:
   max_retries: 2
   premium_max_concurrency: 4
   prompt_cache_size: 2048
-  use_rbac_auth: false
+  use_rbac_auth: true
   token_scope: ""
   llm_api_key: ""
 
@@ -56,7 +56,7 @@ embedding:
   embed_model: ""
   embed_dimensions: 1024
   embed_cache_size: 4096
-  use_rbac_auth: false
+  use_rbac_auth: true
   token_scope: ""
   embed_api_key: ""
 
@@ -65,7 +65,7 @@ cosmos:
   uri: ""
   key: ""
   database_name: "divdet"
-  use_rbac_auth: false
+  use_rbac_auth: true
 
   # Upload settings used by cosmos_db_upload.py
   cosmos_account_name: ""
