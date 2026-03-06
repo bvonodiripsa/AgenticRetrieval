@@ -169,17 +169,25 @@ from prompts import (
     EFFICIENT_SYNTHESIS_PROMPT,
 )
 
-PRELIMINARY_PROMPT = CONFIG.get("pipeline", {}).get("preliminary_prefix", "") + "\n\n" + PRELIMINARY_PROMPT
-EFFICIENT_REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("subquery_prefix", "") + "\n\n" + EFFICIENT_REGENERATE_PROMPT
-SUBQUESTION_PROMPT = CONFIG.get("pipeline", {}).get("subquery_prefix", "") + "\n\n" + SUBQUESTION_PROMPT
+preliminary_prefix = CONFIG.get("pipeline", {}).get("preliminary_prefix", "")
+preliminary_prefix = preliminary_prefix + "\n\n" if preliminary_prefix else ""
+subquery_prefix = CONFIG.get("pipeline", {}).get("subquery_prefix", "")
+subquery_prefix = subquery_prefix + "\n\n" if subquery_prefix else ""
 
-SYNTHESIS_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + SYNTHESIS_PROMPT
-EFFICIENT_REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + EFFICIENT_REGENERATE_PROMPT
-EFFICIENT_SYNTHESIS_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + EFFICIENT_SYNTHESIS_PROMPT
-GAP_DECOMPOSE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + GAP_DECOMPOSE_PROMPT
-REGENERATE_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + REGENERATE_PROMPT
-SUBQUESTION_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + SUBQUESTION_PROMPT
-PRELIMINARY_PROMPT = CONFIG.get("pipeline", {}).get("dataset_description", "") + "\n\n" + PRELIMINARY_PROMPT
+PRELIMINARY_PROMPT = preliminary_prefix + PRELIMINARY_PROMPT
+EFFICIENT_REGENERATE_PROMPT = subquery_prefix + EFFICIENT_REGENERATE_PROMPT
+SUBQUESTION_PROMPT = subquery_prefix + SUBQUESTION_PROMPT
+
+dataset_description = CONFIG.get("pipeline", {}).get("dataset_description", "")
+dataset_description = dataset_description + "\n\n" if dataset_description else ""
+
+SYNTHESIS_PROMPT = dataset_description + SYNTHESIS_PROMPT
+EFFICIENT_REGENERATE_PROMPT = dataset_description + EFFICIENT_REGENERATE_PROMPT
+EFFICIENT_SYNTHESIS_PROMPT = dataset_description + EFFICIENT_SYNTHESIS_PROMPT
+GAP_DECOMPOSE_PROMPT = dataset_description + GAP_DECOMPOSE_PROMPT
+REGENERATE_PROMPT = dataset_description + REGENERATE_PROMPT
+SUBQUESTION_PROMPT = dataset_description + SUBQUESTION_PROMPT
+PRELIMINARY_PROMPT = dataset_description + PRELIMINARY_PROMPT
 
 # =============================================================================
 # LLM CLIENT
