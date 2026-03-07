@@ -7,9 +7,16 @@ ROOT_DIR = Path(__file__).resolve().parent
 OUT_DIR = ROOT_DIR / "out"
 TABLE_PATH = OUT_DIR / "timing_5q_compare_table.tsv"
 
-TIMING_RE = re.compile(r"\[TIMING\]\s+(.*?):\s+\+([0-9]*\.?[0-9]+)s")
+TIMING_RE = re.compile(r"(?:\[TIMING\]|¤)\s+(.*?):\s+\+([0-9]*\.?[0-9]+)s")
+TIMING_TOTAL_RE = re.compile(r"(?:\[TIMING\]|¤)\s+.*?\(total\s+([0-9]*\.?[0-9]+)s\)")
+PROCESSING_RE = re.compile(r"Processing\s+(\d+)\s+questions")
 VEC_DONE_RE = re.compile(r"vector query – done \((\d+) results(?:,\s*([^)]+))?\)")
 MAT_DONE_RE = re.compile(r"vector materialize x\d+ \(([^)]+)\) – done")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
 
 
 def find_timing_logs() -> list[Path]:
@@ -19,7 +26,7 @@ def find_timing_logs() -> list[Path]:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if "[TIMING]" in text:
+        if "[TIMING]" in text or "¤" in text:
             logs.append(path)
     logs.sort(key=lambda p: p.stat().st_mtime)
     return logs
@@ -39,9 +46,15 @@ def parse_timings(text: str):
         "llm_regen1": [],
         "llm_gap": [],
         "pipeline_total": [],
+        "run_totals": [],
     }
 
-    for line in text.splitlines():
+    for raw_line in text.splitlines():
+        line = strip_ansi(raw_line)
+        total_match = TIMING_TOTAL_RE.search(line)
+        if total_match:
+            data["run_totals"].append(float(total_match.group(1)))
+
         match = TIMING_RE.search(line)
         if not match:
             continue
@@ -78,14 +91,22 @@ def parse_timings(text: str):
         elif label.startswith("pipeline.run – TOTAL"):
             data["pipeline_total"].append(value)
 
-    err_lines = [line for line in text.splitlines() if line.startswith("Error:")]
-    badrequest = text.count("BadRequestError on")
-    max_retry = text.count("Max retries exceeded")
+    clean_text = strip_ansi(text)
+    err_lines = [line for line in clean_text.splitlines() if line.startswith("Error:")]
+    badrequest = clean_text.count("BadRequestError on")
+    max_retry = clean_text.count("Max retries exceeded")
+    processing_match = PROCESSING_RE.search(clean_text)
+    questions = int(processing_match.group(1)) if processing_match else None
+    run_wall_total = max(data["run_totals"]) if data["run_totals"] else None
+    wall_per_question = (run_wall_total / questions) if (run_wall_total is not None and questions and questions > 0) else None
 
     data["_meta"] = {
         "errors": len(err_lines),
         "badrequest": badrequest,
         "max_retry": max_retry,
+        "questions": questions,
+        "run_wall_total": run_wall_total,
+        "run_wall_per_question": wall_per_question,
     }
     return data
 
@@ -163,7 +184,10 @@ def build_metric_values(data):
     values["LLM preliminary"] = fmt_single(mean(data["llm_prelim"]))
     values["LLM regenerate rnd 1"] = fmt_single(mean(data["llm_regen1"]))
     values["LLM gap-decompose"] = fmt_range(full_range(data["llm_gap"]))
-    values["pipeline.run TOTAL"] = fmt_single(mean(data["pipeline_total"]))
+    questions = data.get("_meta", {}).get("questions")
+    question_note = f" [{questions} questions]" if isinstance(questions, int) and questions > 0 else ""
+    values["run wall TOTAL / question"] = fmt_single(data.get("_meta", {}).get("run_wall_per_question"))
+    values[f"pipeline.run TOTAL{question_note}"] = fmt_single(mean(data["pipeline_total"]))
     return values
 
 
@@ -172,10 +196,10 @@ def parse_single_seconds(value):
         return None
     if "–" in value or "-" in value:
         return None
-    try:
-        return float(value.rstrip("s"))
-    except ValueError:
+    match = re.search(r"([0-9]*\.?[0-9]+)", value)
+    if not match:
         return None
+    return float(match.group(1))
 
 
 def parse_range_seconds(value):

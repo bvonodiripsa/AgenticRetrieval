@@ -42,6 +42,56 @@ load_dotenv()
 _TIMING: bool = False
 _t0: float = 0.0
 _print_lock = threading.Lock()
+_TIMING_MARK = "¤"
+
+_ANSI_RESET = "\x1b[0m"
+_ANSI_COLORS = {
+    "timing": "\x1b[90m",
+    "query": "\x1b[93m",
+    "success": "\x1b[92m",
+    "warn": "\x1b[93m",
+    "error": "\x1b[91m",
+    "info": "\x1b[94m",
+}
+
+
+def _stdout_supports_color() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("FORCE_COLOR"):
+        return True
+    stream = sys.stdout
+    streams = getattr(stream, "_streams", None)
+    if streams:
+        return any(bool(getattr(s, "isatty", lambda: False)()) for s in streams)
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _colorize(text: str, kind: str) -> str:
+    if not _stdout_supports_color():
+        return text
+    if kind == "timing":
+        base = _ANSI_COLORS["timing"]
+        white = "\x1b[97m"
+        pattern = re.compile(r"(?P<num>[+-]?[0-9]*\.?[0-9]+s)")
+
+        def repl(match: re.Match[str]) -> str:
+            return f"{white}{match.group('num')}{base}"
+
+        return f"{base}{pattern.sub(repl, text)}{_ANSI_RESET}"
+    color = _ANSI_COLORS.get(kind)
+    if not color:
+        return text
+    return f"{color}{text}{_ANSI_RESET}"
+
+
+def _log_line(text: str, kind: str = "info", use_lock: bool = False) -> None:
+    styled = _colorize(text, kind)
+    if use_lock:
+        with _print_lock:
+            print(styled)
+    else:
+        print(styled)
 
 
 def _ck(label: str, ref: float | None = None) -> float:
@@ -50,8 +100,7 @@ def _ck(label: str, ref: float | None = None) -> float:
     if _TIMING:
         elapsed = now - (ref if ref is not None else _t0)
         total = now - _t0
-        with _print_lock:
-            print(f"  [TIMING] {label}: +{elapsed:.3f}s  (total {total:.3f}s)")
+        _log_line(f"  {_TIMING_MARK} {label}: +{elapsed:.3f}s  (total {total:.3f}s)", kind="timing", use_lock=True)
     return now
 
 
@@ -97,6 +146,10 @@ def _multi_activity_reason(response_meta: list[dict[str, str]]) -> str:
         reasons.append("multiple backend executions (possible retries or internal query pipeline calls)")
 
     return f" [Reason: {'; '.join(reasons)}]"
+
+
+class InvalidLLMResponseError(Exception):
+    pass
 
 
 class LRUCache:
@@ -212,7 +265,7 @@ class LLMClient:
         self._local_fallback_disabled_until = 0.0
         self._default_chars_per_token = 4.0
         self._chars_per_token_estimate = self._default_chars_per_token
-        self._min_completion_tokens = 256
+        self._min_completion_tokens = 64
         self._max_context_tokens_hint: int | None = None
         self._max_output_tokens_hint: int | None = None
         self._introspection_done = False
@@ -284,6 +337,11 @@ class LLMClient:
         if self._local_fallback_disabled_until > time.time():
             return False
         return label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer")
+
+    def _is_premium_configured(self) -> bool:
+        endpoint = str(self._cfg.get("llm_endpoint", "") or "").strip()
+        model = str(self._cfg.get("llm_model", "") or "").strip()
+        return bool(endpoint and model)
 
     def _truncate_prompt(self, prompt: str, max_chars: int) -> str:
         if len(prompt) <= max_chars:
@@ -413,6 +471,25 @@ class LLMClient:
             limit = min(limit, self._max_output_tokens_hint)
         return max(self._min_completion_tokens, int(limit))
 
+    def _effective_max_completion_tokens_for_prompt(self, prompt: str, requested_tokens: int) -> int:
+        limit = self._effective_max_completion_tokens(requested_tokens)
+        if self._max_context_tokens_hint is None:
+            return limit
+
+        est_prompt_tokens = max(1, int(len(prompt) / max(1.0, self._chars_per_token_estimate)))
+        safety_reserve = 32
+        available_for_output = self._max_context_tokens_hint - est_prompt_tokens - safety_reserve
+
+        if available_for_output <= 0:
+            raise InvalidLLMResponseError(
+                "Prompt uses full model context window; no room left for completion tokens"
+            )
+
+        return max(1, min(limit, int(available_for_output)))
+
+    def _estimate_prompt_tokens(self, prompt: str) -> int:
+        return max(1, int(len(prompt) / max(1.0, self._chars_per_token_estimate)))
+
     def _effective_prompt_char_limit(self, max_completion_tokens: int) -> int | None:
         if self._max_context_tokens_hint is None:
             return None
@@ -433,12 +510,86 @@ class LLMClient:
             return "Unable to synthesize final answer due request constraints."
         return "Unable to generate response due request constraints."
 
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                    continue
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+            return "".join(parts)
+        return ""
+
+    def _validated_completion_text(self, result: Any, label: str) -> str:
+        choices = getattr(result, "choices", None) or []
+        if not choices:
+            raise InvalidLLMResponseError(f"{label}: no choices in completion result")
+
+        choice = choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+        message = getattr(choice, "message", None)
+        if message is None:
+            raise InvalidLLMResponseError(f"{label}: missing message in completion choice")
+
+        refusal = getattr(message, "refusal", None)
+        tool_calls = getattr(message, "tool_calls", None)
+        raw_content = getattr(message, "content", None)
+        text = self._content_to_text(raw_content)
+
+        issues: list[str] = []
+        if finish_reason in {"tool_calls", "function_call", "content_filter"}:
+            issues.append(f"finish_reason={finish_reason}")
+        if isinstance(refusal, str):
+            if refusal.strip():
+                issues.append("message.refusal present")
+        elif refusal:
+            issues.append("message.refusal present")
+        if tool_calls:
+            issues.append("tool_calls present")
+        if not text or not text.strip():
+            issues.append("empty content")
+
+        if issues:
+            refusal_present = bool(refusal.strip()) if isinstance(refusal, str) else bool(refusal)
+            tool_calls_present = bool(tool_calls)
+            content_type = type(raw_content).__name__ if raw_content is not None else "None"
+            content_len = len(text) if isinstance(text, str) else 0
+            diag = (
+                f"finish_reason={finish_reason or 'None'}, "
+                f"refusal={refusal_present}, "
+                f"tool_calls={tool_calls_present}, "
+                f"content_type={content_type}, "
+                f"content_len={content_len}"
+            )
+            raise InvalidLLMResponseError(f"{label}: invalid completion ({'; '.join(issues)}) [{diag}]")
+
+        return text.strip()
+
     async def _complete_premium_once(self, prompt: str, label: str, max_completion_tokens: int) -> str:
         await self._introspect_llm_capabilities()
-        max_completion_tokens = self._effective_max_completion_tokens(max_completion_tokens)
-        prompt_char_limit = self._effective_prompt_char_limit(max_completion_tokens)
-        if prompt_char_limit is not None:
-            prompt = self._truncate_prompt(prompt, prompt_char_limit)
+        estimated_prompt_tokens = self._estimate_prompt_tokens(prompt)
+        max_completion_tokens = self._effective_max_completion_tokens_for_prompt(prompt, max_completion_tokens)
+        if _TIMING:
+            _log_line(
+                "  ¤ "
+                f"{label} token budget: prompt_est={estimated_prompt_tokens}, "
+                f"completion={max_completion_tokens}, "
+                f"context_hint={self._max_context_tokens_hint}, "
+                f"output_hint={self._max_output_tokens_hint}",
+                kind="timing",
+                use_lock=True,
+            )
 
         t = _ck(f"{label} – start")
         async with self._premium_semaphore:
@@ -461,7 +612,7 @@ class LLMClient:
             observed = min(8.0, max(2.0, observed))
             self._chars_per_token_estimate = (self._chars_per_token_estimate * 0.8) + (observed * 0.2)
 
-        return result.choices[0].message.content or ""
+        return self._validated_completion_text(result, label)
 
     async def _complete_premium(self, prompt: str, retries: int, label: str) -> str:
         if retries is None:
@@ -470,9 +621,12 @@ class LLMClient:
         for attempt in range(retries):
             try:
                 return await self._complete_premium_once(prompt, label, max_completion_tokens)
+            except InvalidLLMResponseError as e:
+                _log_line(f"Invalid LLM response on {label}: {e}", kind="warn")
+                raise
             except openai.RateLimitError:
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
-                print(f"Rate limited, retry in {wait}s ({attempt + 1}/{retries})")
+                _log_line(f"Rate limited, retry in {wait}s ({attempt + 1}/{retries})", kind="warn")
                 await asyncio.sleep(wait)
             except openai.BadRequestError as e:
                 error_text = str(e)
@@ -492,9 +646,10 @@ class LLMClient:
                     max_completion_tokens = max(self._min_completion_tokens, int(max_completion_tokens * 0.75))
                     changed = True
                 if changed:
-                    print(
+                    _log_line(
                         f"BadRequestError on {label}; retrying with adaptive limits "
-                        f"(max_completion_tokens={max_completion_tokens})"
+                        f"(max_completion_tokens={max_completion_tokens})",
+                        kind="warn",
                     )
                     continue
                 raise
@@ -502,12 +657,12 @@ class LLMClient:
                 if self._is_key_auth_disabled_error(e) and not self._use_rbac_auth:
                     try:
                         self._switch_to_rbac_auth()
-                        print("Azure OpenAI key auth is disabled for this resource; switched to Entra ID RBAC")
+                        _log_line("Azure OpenAI key auth is disabled for this resource; switched to Entra ID RBAC", kind="success")
                         continue
                     except Exception as switch_err:
-                        print(f"Failed switching to Entra ID RBAC ({type(switch_err).__name__}); continuing retries")
+                        _log_line(f"Failed switching to Entra ID RBAC ({type(switch_err).__name__}); continuing retries", kind="error")
                 wait = min(5.0 * (2 ** attempt), 5.0 * (2 ** 8))
-                print(f"LLMAPI error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})")
+                _log_line(f"LLMAPI error ({type(e).__name__}), retry in {wait}s ({attempt + 1}/{retries})", kind="error")
                 await asyncio.sleep(wait)
         raise Exception("Max retries exceeded")
 
@@ -533,6 +688,8 @@ class LLMClient:
         text = payload.get("response")
         if not isinstance(text, str):
             raise RuntimeError(f"Unexpected local fallback payload: {payload}")
+        if not text.strip():
+            raise RuntimeError("Local fallback returned empty content")
         _ck(f"{label} (local) – done", t)
         return text
 
@@ -540,14 +697,25 @@ class LLMClient:
         if retries is None:
             retries = int(self._cfg["max_retries"])
 
-        use_local = self._should_use_local_fallback(label)
-        route_key = "local" if use_local else "premium"
+        use_local_fallback = self._should_use_local_fallback(label)
+        premium_configured = self._is_premium_configured()
+        route_key = "premium" if premium_configured else "local"
         cache_key = f"{route_key}|{label}|{prompt}"
         cached = self._response_cache.get(cache_key)
         if isinstance(cached, str):
             return cached
 
-        if use_local:
+        premium_error: Exception | None = None
+
+        if premium_configured:
+            try:
+                premium_response = await self._complete_premium(prompt, retries, label)
+                self._response_cache.set(cache_key, premium_response)
+                return premium_response
+            except Exception as e:
+                premium_error = e
+
+        if use_local_fallback and (not premium_configured or premium_error is not None):
             try:
                 local_response = await self._complete_local(prompt, label)
                 self._local_fallback_failures = 0
@@ -557,23 +725,28 @@ class LLMClient:
                 self._local_fallback_failures += 1
                 if self._local_fallback_failures >= self._local_fallback_failure_threshold:
                     self._local_fallback_disabled_until = time.time() + self._local_fallback_cooldown_seconds
-                    print(
+                    _log_line(
                         f"Local fallback temporarily disabled for {self._local_fallback_cooldown_seconds}s "
-                        f"after {self._local_fallback_failures} failures"
+                        f"after {self._local_fallback_failures} failures",
+                        kind="warn",
                     )
-                print(f"Local fallback error ({type(e).__name__}); falling back to premium model")
+                _log_line(f"Local fallback error ({type(e).__name__}); local fallback unavailable", kind="error")
 
-        try:
-            premium_response = await self._complete_premium(prompt, retries, label)
-        except openai.BadRequestError as e:
-            print(f"BadRequestError on {label}; using safe fallback response")
-            premium_response = self._safe_fallback_response(label)
-        except Exception:
-            if label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer"):
-                print(f"{label} failed after retries; using safe fallback response")
+        if premium_error is not None:
+            if isinstance(premium_error, InvalidLLMResponseError):
+                _log_line(f"Invalid LLM response on {label}; using safe fallback response", kind="warn")
+                premium_response = self._safe_fallback_response(label)
+            elif isinstance(premium_error, openai.BadRequestError):
+                _log_line(f"BadRequestError on {label}; using safe fallback response", kind="warn")
+                premium_response = self._safe_fallback_response(label)
+            elif label.startswith("LLM gap-decompose") or label.startswith("LLM sub-Q answer"):
+                _log_line(f"{label} failed after retries; using safe fallback response", kind="warn")
                 premium_response = self._safe_fallback_response(label)
             else:
-                raise
+                raise premium_error
+        else:
+            premium_response = self._safe_fallback_response(label)
+
         self._response_cache.set(cache_key, premium_response)
         return premium_response
     
@@ -903,6 +1076,8 @@ class DecomposedRAGPipeline:
 def load_questions(path: Path) -> dict[str, list[Question]]:
     questions: dict[str, list[Question]] = {}
     for f in path.glob("*.json"):
+        if not f.stem or not f.stem[0].isalpha():
+            continue
         if f.stem.startswith("_") or f.stem.endswith("_test_query"):
             continue
         data = json.loads(f.read_text(encoding="utf-8-sig"))
@@ -952,12 +1127,14 @@ async def main_async():
     total_fulltext_k = retriever.total_fulltext_k
     total_vector_k = retriever.total_vector_k
     total_k = total_fulltext_k + total_vector_k
-    print(
+    _log_line(
         f"Decomposed RAG: sources={retriever.source_count}, "
         f"fulltext_total={total_fulltext_k}, vector_total={total_vector_k}, diverse={args.k_diverse}"
+        ,
+        kind="info"
     )
     if _TIMING:
-        print("[TIMING enabled] All checkpoints printed as +<step_elapsed>s (total <from_start>s)")
+        _log_line("¤ enabled: checkpoints printed as +<step_elapsed>s (total <from_start>s)", kind="timing")
 
     t = _ck("retriever.initialize – start")
     await retriever.initialize()
@@ -977,7 +1154,7 @@ async def main_async():
     all_questions: list[Question] = [q for qs in questions_by_file.values() for q in qs]
     if args.max_questions:
         all_questions = all_questions[:args.max_questions]
-    print(f"Processing {len(all_questions)} questions")
+    _log_line(f"Processing {len(all_questions)} questions", kind="info")
     
     div_suffix = f"_div{args.k_diverse}" if args.k_diverse > 0 else ""
     output_path = args.output_root / f"k{total_k}_ft{total_fulltext_k}_vec{total_vector_k}{div_suffix}"
@@ -998,7 +1175,7 @@ async def main_async():
         group_dir = output_path / "intermediate" / group_name
         await asyncio.to_thread(group_dir.mkdir, parents=True, exist_ok=True)
         result_file = group_dir / f"{q.question_id}.json"
-        await asyncio.to_thread(result_file.write_text, json.dumps(result, indent=2))
+        await asyncio.to_thread(result_file.write_text, json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         return result
 
     semaphore = asyncio.Semaphore(max(1, args.max_workers))
@@ -1013,7 +1190,7 @@ async def main_async():
             try:
                 results.append(await task)
             except Exception as e:
-                print(f"Error: {e}")
+                _log_line(f"Error: {e}", kind="error")
             finally:
                 pbar.update(1)
     
@@ -1035,10 +1212,18 @@ async def main_async():
         })
     # Single timestamp shared across all output files so they are identifiable as one run
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    written_answer_files: list[Path] = []
     for source_stem, answers in results_by_file.items():
         answers_filename = f"{source_stem}_{timestamp}.json"
-        await asyncio.to_thread((output_path / answers_filename).write_text, json.dumps(answers, indent=2))
-    print(f"Done! Results: {output_path}")
+        answers_file_path = output_path / answers_filename
+        await asyncio.to_thread(answers_file_path.write_text, json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+        written_answer_files.append(answers_file_path)
+    if len(written_answer_files) == 1:
+        _log_line(f"Done! Answers file: {written_answer_files[0]}", kind="success")
+    else:
+        _log_line(f"Done! Answers files ({len(written_answer_files)}):", kind="success")
+        for file_path in written_answer_files:
+            _log_line(f"  - {file_path}", kind="success")
 
     await retriever.close()
     await llm.close()
@@ -1086,7 +1271,7 @@ if __name__ == "__main__":
                     sys.stderr = original_stderr
 
         shutil.copyfile(run_log_path, latest_log_path)
-        print(f"[TIMING] wrote log: {run_log_path}")
-        print(f"[TIMING] updated latest: {latest_log_path}")
+        _log_line(f"¤ wrote log: {run_log_path}", kind="timing")
+        _log_line(f"¤ updated latest: {latest_log_path}", kind="timing")
     else:
         asyncio.run(main_async())

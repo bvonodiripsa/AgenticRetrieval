@@ -15,6 +15,7 @@ from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, De
 
 import rag_divdet as _rag
 from rag_divdet import (
+    _log_line,
     _format_activity_id_note,
     _multi_activity_reason,
     CONFIG,
@@ -34,10 +35,6 @@ def _runtime_module() -> Any:
 
 def _timing_enabled() -> bool:
     return bool(getattr(_runtime_module(), "_TIMING", False))
-
-
-def _timing_lock() -> Any:
-    return getattr(_runtime_module(), "_print_lock")
 
 
 def _ck(label: str, ref: float | None = None) -> float:
@@ -176,17 +173,17 @@ class CombinedRetriever:
         if self._cosmos_az_login:
             credential = AsyncAzureCliCredential()
             self._credential = credential
-            print("✓ Using 'az login' (AzureCliCredential) authentication for Cosmos DB")
+            _log_line("✓ Using 'az login' (AzureCliCredential) authentication for Cosmos DB", kind="success")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=credential)
         elif use_rbac_auth:
             credential = DefaultAzureCredential()
             self._credential = credential
-            print("✓ Using Entra ID RBAC authentication for Cosmos DB")
+            _log_line("✓ Using Entra ID RBAC authentication for Cosmos DB", kind="success")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=credential)
         else:
             if not COSMOS_KEY:
                 raise ValueError("Cosmos DB key not configured. Set cosmos.key in config.yaml.")
-            print("✓ Using key-based authentication for Cosmos DB")
+            _log_line("✓ Using key-based authentication for Cosmos DB", kind="success")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=COSMOS_KEY, connection_mode="Direct")
 
         self._db = self._cosmos.get_database_client(DATABASE_NAME)
@@ -219,8 +216,7 @@ class CombinedRetriever:
         try:
             sql = f"SELECT TOP {top_k} * FROM c {order}"
             if _timing_enabled():
-                with _timing_lock():
-                    print(f"  [QUERY] fulltext SQL ({container.id}): {sql}")
+                _log_line(f"  fulltext SQL ({container.id}): {sql}", kind="query", use_lock=True)
 
             t = _ck(f"fulltext query (top {top_k}, {container.id}) – start")
             query_iterator = container.query_items(query=sql, parameters=[])
@@ -231,7 +227,7 @@ class CombinedRetriever:
             _ck(f"fulltext query – done ({len(items)} results, {container.id})", t)
             return items
         except Exception as e:
-            print(f"Fulltext error ({container.id}): {e}")
+            _log_line(f"Fulltext error ({container.id}): {e}", kind="error")
             return []
 
     async def _vector_search(
@@ -258,12 +254,13 @@ class CombinedRetriever:
             f"FROM c ORDER BY VectorDistance(c.{vector_field}, @emb)"
         )
         if _timing_enabled():
-            with _timing_lock():
-                text_preview = f", text={query_text!r}" if query_text else ""
-                print(
-                    f"  [QUERY] vector SQL ({container.id}): {sql}  "
-                    f"[@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>, @field={vector_field!r}{text_preview}]"
-                )
+            text_preview = f", text={query_text!r}" if query_text else ""
+            _log_line(
+                f"  vector SQL ({container.id}): {sql}  "
+                f"[@k={top_k}, @emb=<{len(adjusted_emb)}-dim vector>, @field={vector_field!r}{text_preview}]",
+                kind="query",
+                use_lock=True,
+            )
 
         t = _ck(f"vector query (top {top_k}, {container.id}) – start")
 
@@ -417,7 +414,7 @@ class CombinedRetriever:
             missing_chunks = [c for c in chunks if c.metadata.get('embedding') is None]
             n_missing = len(missing_chunks)
             if missing_chunks:
-                print(f"  {n_missing} chunks missing embeddings, computing now...")
+                _log_line(f"  {n_missing} chunks missing embeddings, computing now...", kind="warn")
                 missing_embeddings = await asyncio.gather(*(self._llm.embed(c.text) for c in missing_chunks))
                 for chunk, embedding in zip(missing_chunks, missing_embeddings):
                     chunk.metadata['embedding'] = embedding
