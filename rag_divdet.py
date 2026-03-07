@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import contextvars
 import datetime
 import json
 import os
@@ -43,11 +44,12 @@ _TIMING: bool = False
 _t0: float = 0.0
 _print_lock = threading.Lock()
 _TIMING_MARK = "¤"
+_CURRENT_QUESTION_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_question_id", default=None)
 
 _ANSI_RESET = "\x1b[0m"
 _ANSI_COLORS = {
     "timing": "\x1b[90m",
-    "query": "\x1b[93m",
+    "query": "\x1b[2;33m",
     "success": "\x1b[92m",
     "warn": "\x1b[93m",
     "error": "\x1b[91m",
@@ -79,6 +81,18 @@ def _colorize(text: str, kind: str) -> str:
             return f"{white}{match.group('num')}{base}"
 
         return f"{base}{pattern.sub(repl, text)}{_ANSI_RESET}"
+    if kind == "query":
+        base = _ANSI_COLORS["query"]
+        highlight = "\x1b[22;93m"
+        pattern = re.compile(r"(?P<prefix>text=)(?P<quote>['\"])(?P<value>.*?)(?P=quote)")
+
+        def repl(match: re.Match[str]) -> str:
+            prefix = match.group("prefix")
+            quote = match.group("quote")
+            value = match.group("value")
+            return f"{prefix}{quote}{highlight}{value}{base}{quote}"
+
+        return f"{base}{pattern.sub(repl, text)}{_ANSI_RESET}"
     color = _ANSI_COLORS.get(kind)
     if not color:
         return text
@@ -86,6 +100,8 @@ def _colorize(text: str, kind: str) -> str:
 
 
 def _log_line(text: str, kind: str = "info", use_lock: bool = False) -> None:
+    if kind == "query":
+        text = _query_text_with_question_prefix(text)
     styled = _colorize(text, kind)
     if use_lock:
         with _print_lock:
@@ -94,13 +110,47 @@ def _log_line(text: str, kind: str = "info", use_lock: bool = False) -> None:
         print(styled)
 
 
+def _get_current_question_id() -> str | None:
+    main_mod = sys.modules.get("__main__")
+    runtime_var = getattr(main_mod, "_CURRENT_QUESTION_ID", None)
+    if runtime_var is not None and hasattr(runtime_var, "get"):
+        try:
+            value = runtime_var.get()
+        except Exception:
+            value = None
+        if value:
+            return value
+    return _CURRENT_QUESTION_ID.get()
+
+
+def _timing_text_with_question_prefix(text: str) -> str:
+    question_id = _get_current_question_id()
+    if not question_id:
+        return text
+    marker = f"{_TIMING_MARK} "
+    if marker in text:
+        return text.replace(marker, f"{marker}{question_id}: ", 1)
+    return f"{question_id}: {text}"
+
+
+def _query_text_with_question_prefix(text: str) -> str:
+    question_id = _get_current_question_id()
+    if not question_id:
+        return text
+    return f"    {question_id}: {text.lstrip()}"
+
+
 def _ck(label: str, ref: float | None = None) -> float:
     """Print a timing checkpoint; returns current perf_counter value."""
     now = time.perf_counter()
     if _TIMING:
         elapsed = now - (ref if ref is not None else _t0)
         total = now - _t0
-        _log_line(f"  {_TIMING_MARK} {label}: +{elapsed:.3f}s  (total {total:.3f}s)", kind="timing", use_lock=True)
+        _log_line(
+            _timing_text_with_question_prefix(f"  {_TIMING_MARK} {label}: +{elapsed:.3f}s  (total {total:.3f}s)"),
+            kind="timing",
+            use_lock=True,
+        )
     return now
 
 
@@ -582,11 +632,13 @@ class LLMClient:
         max_completion_tokens = self._effective_max_completion_tokens_for_prompt(prompt, max_completion_tokens)
         if _TIMING:
             _log_line(
-                "  ¤ "
-                f"{label} token budget: prompt_est={estimated_prompt_tokens}, "
-                f"completion={max_completion_tokens}, "
-                f"context_hint={self._max_context_tokens_hint}, "
-                f"output_hint={self._max_output_tokens_hint}",
+                _timing_text_with_question_prefix(
+                    "  ¤ "
+                    f"{label} token budget: prompt_est={estimated_prompt_tokens}, "
+                    f"completion={max_completion_tokens}, "
+                    f"context_hint={self._max_context_tokens_hint}, "
+                    f"output_hint={self._max_output_tokens_hint}"
+                ),
                 kind="timing",
                 use_lock=True,
             )
@@ -1163,10 +1215,14 @@ async def main_async():
     results = []
 
     async def process(q: Question):
-        if args.efficient:
-            result = await pipeline.run_efficient(q.question_text)
-        else:
-            result = await pipeline.run(q.question_text)
+        token = _CURRENT_QUESTION_ID.set(q.question_id)
+        try:
+            if args.efficient:
+                result = await pipeline.run_efficient(q.question_text)
+            else:
+                result = await pipeline.run(q.question_text)
+        finally:
+            _CURRENT_QUESTION_ID.reset(token)
         result["question_id"] = q.question_id
         result["question_text"] = q.question_text
         result["group"] = q.group

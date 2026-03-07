@@ -7,8 +7,11 @@ ROOT_DIR = Path(__file__).resolve().parent
 OUT_DIR = ROOT_DIR / "out"
 TABLE_PATH = OUT_DIR / "timing_5q_compare_table.tsv"
 
-TIMING_RE = re.compile(r"(?:\[TIMING\]|¤)\s+(.*?):\s+\+([0-9]*\.?[0-9]+)s")
-TIMING_TOTAL_RE = re.compile(r"(?:\[TIMING\]|¤)\s+.*?\(total\s+([0-9]*\.?[0-9]+)s\)")
+TIMING_ENTRY_RE = re.compile(
+    r"(?:\[TIMING\]|¤)\s+"
+    r"(?P<body>.+?)(?=:\s+\+[0-9]*\.?[0-9]+s\s+\(total\s+[0-9]*\.?[0-9]+s\))"
+    r":\s+\+(?P<value>[0-9]*\.?[0-9]+)s\s+\(total\s+(?P<total>[0-9]*\.?[0-9]+)s\)"
+)
 PROCESSING_RE = re.compile(r"Processing\s+(\d+)\s+questions")
 VEC_DONE_RE = re.compile(r"vector query – done \((\d+) results(?:,\s*([^)]+))?\)")
 MAT_DONE_RE = re.compile(r"vector materialize x\d+ \(([^)]+)\) – done")
@@ -32,6 +35,11 @@ def find_timing_logs() -> list[Path]:
     return logs
 
 
+def is_completed_timing_log(text: str) -> bool:
+    clean_text = strip_ansi(text)
+    return ("pipeline.run – TOTAL" in clean_text) or ("pipeline.run_efficient – TOTAL" in clean_text)
+
+
 def parse_timings(text: str):
     data = {
         "retrieve_total": [],
@@ -49,18 +57,29 @@ def parse_timings(text: str):
         "run_totals": [],
     }
 
-    for raw_line in text.splitlines():
-        line = strip_ansi(raw_line)
-        total_match = TIMING_TOTAL_RE.search(line)
-        if total_match:
-            data["run_totals"].append(float(total_match.group(1)))
+    clean_text = strip_ansi(text)
 
-        match = TIMING_RE.search(line)
-        if not match:
-            continue
+    def normalize_label(body: str) -> str:
+        label = body.strip()
+        if ": " in label:
+            prefix, rest = label.split(": ", 1)
+            valid_label_prefixes = (
+                "pipeline.",
+                "pipeline:",
+                "retrieve",
+                "fulltext",
+                "vector",
+                "LLM ",
+                "embed",
+            )
+            if rest.startswith(valid_label_prefixes):
+                return rest.strip()
+        return label
 
-        label = match.group(1).strip()
-        value = float(match.group(2))
+    for match in TIMING_ENTRY_RE.finditer(clean_text):
+        label = normalize_label(match.group("body"))
+        value = float(match.group("value"))
+        data["run_totals"].append(float(match.group("total")))
 
         if label.startswith("retrieve – TOTAL"):
             data["retrieve_total"].append(value)
@@ -91,7 +110,6 @@ def parse_timings(text: str):
         elif label.startswith("pipeline.run – TOTAL"):
             data["pipeline_total"].append(value)
 
-    clean_text = strip_ansi(text)
     err_lines = [line for line in clean_text.splitlines() if line.startswith("Error:")]
     badrequest = clean_text.count("BadRequestError on")
     max_retry = clean_text.count("Max retries exceeded")
@@ -306,13 +324,22 @@ def main():
             "No timing logs found in out/. Run rag_divdet.py with --timing and capture output to a .log file in out/."
         )
 
-    current_log_path = timing_logs[-1]
-    current_log_text = current_log_path.read_text(encoding="utf-8", errors="ignore")
+    completed_logs: list[tuple[Path, str]] = []
+    for path in timing_logs:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if is_completed_timing_log(text):
+            completed_logs.append((path, text))
+
+    if completed_logs:
+        current_log_path, current_log_text = completed_logs[-1]
+    else:
+        current_log_path = timing_logs[-1]
+        current_log_text = current_log_path.read_text(encoding="utf-8", errors="ignore")
 
     previous_log_path = None
     previous_log_text = None
-    for candidate in reversed(timing_logs[:-1]):
-        candidate_text = candidate.read_text(encoding="utf-8", errors="ignore")
+    candidate_pool = completed_logs[:-1] if completed_logs else [(path, path.read_text(encoding="utf-8", errors="ignore")) for path in timing_logs[:-1]]
+    for candidate, candidate_text in reversed(candidate_pool):
         if candidate_text != current_log_text:
             previous_log_path = candidate
             previous_log_text = candidate_text

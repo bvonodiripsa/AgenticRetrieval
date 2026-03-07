@@ -216,7 +216,11 @@ class CombinedRetriever:
         try:
             sql = f"SELECT TOP {top_k} * FROM c {order}"
             if _timing_enabled():
-                _log_line(f"  fulltext SQL ({container.id}): {sql}", kind="query", use_lock=True)
+                _log_line(
+                    f"  fulltext SQL ({container.id}): {sql}  [text={query!r}]",
+                    kind="query",
+                    use_lock=True,
+                )
 
             t = _ck(f"fulltext query (top {top_k}, {container.id}) – start")
             query_iterator = container.query_items(query=sql, parameters=[])
