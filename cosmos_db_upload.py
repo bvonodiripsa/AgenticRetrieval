@@ -4,11 +4,11 @@ Cosmos DB Document Upload Script with OpenAI Embeddings
 This script:
 1. Automatically ensures missing Cosmos DB containers for enabled upload targets when
     management settings are available; otherwise skips missing targets.
-2. Determines upload targets from `cosmos.sources` in config.
-3. Supports optional `--folder` override to use one input folder for all enabled targets.
-4. Scans all files in each enabled folder (content is assumed JSON), parses documents, and
-    generates embeddings from the configured `llm.embed_endpoint` / `llm.embed_model`.
-5. Uploads documents to the matching container and stores vectors in the configured embedding field.
+2. Determines upload targets from `cosmos.sources` in config, using each source's
+    `documents_root` (folder or JSONL file path).
+3. Scans all files in each enabled folder (content is assumed JSON) or reads JSONL files,
+    parses documents, and generates embeddings from the configured embedding endpoint/model.
+4. Uploads documents to the matching container and stores vectors in the configured embedding field.
 """
 
 import os
@@ -53,36 +53,60 @@ from pathlib import Path
 LOCAL_EMBED_WORKERS = 8
 UPLOAD_WORKERS = 8
 
-# Load config from yaml
-_CONFIG_PATH = Path(__file__).parent / "config.yaml"
-with open(_CONFIG_PATH) as _f:
-    CONFIG = yaml.safe_load(_f)
-    
-# Cosmos DB Configuration
-COSMOS_ENDPOINT = CONFIG["cosmos"]["uri"]
-COSMOS_KEY = CONFIG["cosmos"]["key"]
-DATABASE_NAME = CONFIG["cosmos"]["database_name"]
+# ---------------------------------------------------------------------------
+# Module-level config placeholders (set by load_config)
+# ---------------------------------------------------------------------------
+CONFIG: dict[str, Any] = {}
+COSMOS_ENDPOINT: str = ""
+COSMOS_KEY: str = ""
+DATABASE_NAME: str = ""
+COSMOS_ACCOUNT_NAME: str = ""
+COSMOS_RESOURCE_GROUP: str = ""
+AZURE_SUBSCRIPTION_ID: str = ""
+EMBED_ENDPOINT: str = ""
+EMBED_MODEL: str = ""
+EMBEDDING_DIMENSIONS: int = 1024
+EMBED_API_VERSION: str = "2024-05-01-preview"
+EMBED_API_KEY: str = ""
+EMBEDDING_BATCH_SIZE: int = 20
+VECTOR_EMBEDDING_POLICY: dict[str, Any] | None = None
+SOURCE_CONFIGS: list[dict[str, Any]] = []
 
-# Azure Resource Manager configuration (extracted from endpoint)
-# e.g., https://myaccount.documents.azure.com:443/ -> account name is myaccount
-COSMOS_ACCOUNT_NAME = CONFIG["cosmos"]["cosmos_account_name"]
-COSMOS_RESOURCE_GROUP = CONFIG["cosmos"]["cosmos_resource_group"]
-AZURE_SUBSCRIPTION_ID = CONFIG["cosmos"]["azure_subscription_id"]
 
-# Embedding configuration: 'embedding' section overrides 'llm' section for backward compatibility
-_EMBED_CFG = {**CONFIG.get("llm", {}), **CONFIG.get("embedding", {})}
-EMBED_ENDPOINT = str(_EMBED_CFG.get("embed_endpoint", "")).strip().strip('"')
-EMBED_MODEL = _EMBED_CFG.get("embed_model", "")
-EMBEDDING_DIMENSIONS = int(_EMBED_CFG.get("embed_dimensions", 1024))
-LLM_API_VERSION = CONFIG["llm"]["api_version"]
-_SHARED_KEY = CONFIG["llm"].get("azure_openai_key", "")
-AZURE_OPENAI_KEY = _SHARED_KEY  # kept for backward compatibility
-EMBED_API_KEY = str(_EMBED_CFG.get("embed_api_key") or _SHARED_KEY or "").strip()
+def load_config(config_path: Path) -> None:
+    """Load configuration from YAML and set module globals."""
+    global CONFIG, COSMOS_ENDPOINT, COSMOS_KEY, DATABASE_NAME
+    global COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP, AZURE_SUBSCRIPTION_ID
+    global EMBED_ENDPOINT, EMBED_MODEL, EMBEDDING_DIMENSIONS, EMBED_API_VERSION, EMBED_API_KEY
+    global EMBEDDING_BATCH_SIZE, VECTOR_EMBEDDING_POLICY, SOURCE_CONFIGS
 
-# Batch configuration
-EMBEDDING_BATCH_SIZE = int(CONFIG["cosmos"]["embedding_batch_size"])  # Number of texts to embed in one API call
+    with open(config_path) as f:
+        CONFIG = yaml.safe_load(f)
 
-VECTOR_EMBEDDING_POLICY = json.loads(CONFIG["cosmos"]["vector_embedding_policy_json"])
+    _cosmos_cfg = CONFIG.get("cosmos", {})
+    COSMOS_ENDPOINT = str(_cosmos_cfg.get("uri", "")).strip()
+    COSMOS_KEY = str(_cosmos_cfg.get("key", "")).strip()
+    DATABASE_NAME = str(_cosmos_cfg.get("database_name", "")).strip()
+    COSMOS_ACCOUNT_NAME = str(_cosmos_cfg.get("cosmos_account_name", "")).strip()
+    COSMOS_RESOURCE_GROUP = str(_cosmos_cfg.get("cosmos_resource_group", "")).strip()
+    AZURE_SUBSCRIPTION_ID = str(_cosmos_cfg.get("azure_subscription_id", "")).strip()
+
+    _embed_cfg = CONFIG.get("embedding", {})
+    EMBED_ENDPOINT = str(_embed_cfg.get("embed_endpoint", "")).strip().strip('"')
+    EMBED_MODEL = str(_embed_cfg.get("embed_model", "")).strip()
+    EMBEDDING_DIMENSIONS = int(_embed_cfg.get("embed_dimensions", 1024))
+    EMBED_API_VERSION = str(_embed_cfg.get("api_version", "2024-05-01-preview"))
+    EMBED_API_KEY = str(_embed_cfg.get("embed_api_key", "") or "").strip()
+
+    EMBEDDING_BATCH_SIZE = int(_cosmos_cfg.get("embedding_batch_size", 20))
+
+    _vep_raw = _cosmos_cfg.get("vector_embedding_policy_json")
+    if _vep_raw:
+        VECTOR_EMBEDDING_POLICY = json.loads(_vep_raw) if isinstance(_vep_raw, str) else _vep_raw
+    else:
+        VECTOR_EMBEDDING_POLICY = None
+
+    SOURCE_CONFIGS = _sources_upload_config_from_yaml(CONFIG)
 
 
 def _has_value(value: Any) -> bool:
@@ -111,6 +135,36 @@ def _safe_load_json_policy(raw: Any) -> dict[str, Any] | None:
     return None
 
 
+def _build_indexing_policy_from_fields(text_fields: list[str], embedding_field: str = "e") -> dict[str, Any]:
+    """Auto-generate indexing policy from embedding_text_fields."""
+    return {
+        "indexingMode": "consistent",
+        "automatic": True,
+        "includedPaths": [{"path": "/*"}],
+        "excludedPaths": [
+            {"path": "/\"_etag\"/?"},
+            {"path": f"/{embedding_field}/*"},
+        ],
+        "fullTextIndexes": [{"path": f"/{f}"} for f in text_fields],
+        "vectorIndexes": [
+            {
+                "path": f"/{embedding_field}",
+                "type": "diskANN",
+                "quantizationByteSize": 192,
+                "indexingSearchListSize": 100,
+            }
+        ],
+    }
+
+
+def _build_full_text_policy_from_fields(text_fields: list[str]) -> dict[str, Any]:
+    """Auto-generate full-text policy from embedding_text_fields."""
+    return {
+        "defaultLanguage": "en-US",
+        "fullTextPaths": [{"path": f"/{f}", "language": "en-US"} for f in text_fields],
+    }
+
+
 def _sources_upload_config_from_yaml(config: dict[str, Any]) -> list[dict[str, Any]]:
     cosmos_cfg = config.get("cosmos", {})
     configured_sources = cosmos_cfg.get("sources")
@@ -128,22 +182,31 @@ def _sources_upload_config_from_yaml(config: dict[str, Any]) -> list[dict[str, A
     for idx, source in enumerate(configured_sources, start=1):
         source = source or {}
         source_id = str(source.get("id") or f"source_{idx}").strip()
+        embedding_field = str(source.get("embedding_field") or "e").strip()
+        embedding_text_fields = _as_list_of_strings(source.get("embedding_text_fields"))
+
+        indexing_policy = _safe_load_json_policy(source.get("indexing_policy_json"))
+        full_text_policy = _safe_load_json_policy(source.get("full_text_policy_json"))
+
+        # Auto-generate policies from embedding_text_fields when not explicitly provided
+        if not indexing_policy and embedding_text_fields:
+            indexing_policy = _build_indexing_policy_from_fields(embedding_text_fields, embedding_field)
+        if not full_text_policy and embedding_text_fields:
+            full_text_policy = _build_full_text_policy_from_fields(embedding_text_fields)
+
         normalized_sources.append(
             {
                 "id": source_id,
                 "container_name": source.get("container_name"),
                 "partition_key_path": source.get("partition_key_path"),
                 "documents_root": source.get("documents_root"),
-                "embedding_field": str(source.get("embedding_field") or "e").strip(),
-                "embedding_text_fields": _as_list_of_strings(source.get("embedding_text_fields")),
-                "indexing_policy": _safe_load_json_policy(source.get("indexing_policy_json")),
-                "full_text_policy": _safe_load_json_policy(source.get("full_text_policy_json")),
+                "embedding_field": embedding_field,
+                "embedding_text_fields": embedding_text_fields,
+                "indexing_policy": indexing_policy,
+                "full_text_policy": full_text_policy,
             }
         )
     return normalized_sources
-
-
-SOURCE_CONFIGS = _sources_upload_config_from_yaml(CONFIG)
 
 
 def _normalize_embedding(embedding: List[float]) -> List[float]:
@@ -166,12 +229,12 @@ def get_embedding_client() -> AsyncAzureOpenAI | None:
         azure_endpoint = azure_endpoint.split("/openai/deployments/")[0]
 
     if not EMBED_API_KEY:
-        raise ValueError("llm.embed_api_key (or llm.azure_openai_key) must be set for Azure OpenAI embedding endpoint")
+        raise ValueError("embedding.embed_api_key must be set for Azure OpenAI embedding endpoint")
 
     return AsyncAzureOpenAI(
         azure_endpoint=azure_endpoint,
         api_key=EMBED_API_KEY,
-        api_version=LLM_API_VERSION,
+        api_version=EMBED_API_VERSION,
     )
 
 
@@ -367,17 +430,29 @@ def create_database_and_container_via_management(credential, source_specs: List[
             ]
         )
 
-        vector_embedding_policy = VectorEmbeddingPolicy(
-            vector_embeddings=[
-                VectorEmbedding(
-                    path=vector_path,
-                    data_type=v["dataType"],
-                    dimensions=v["dimensions"],
-                    distance_function=v["distanceFunction"]
-                )
-                for v in VECTOR_EMBEDDING_POLICY["vectorEmbeddings"]
-            ]
-        )
+        if VECTOR_EMBEDDING_POLICY:
+            vector_embedding_policy = VectorEmbeddingPolicy(
+                vector_embeddings=[
+                    VectorEmbedding(
+                        path=vector_path,
+                        data_type=v["dataType"],
+                        dimensions=v["dimensions"],
+                        distance_function=v["distanceFunction"]
+                    )
+                    for v in VECTOR_EMBEDDING_POLICY["vectorEmbeddings"]
+                ]
+            )
+        else:
+            vector_embedding_policy = VectorEmbeddingPolicy(
+                vector_embeddings=[
+                    VectorEmbedding(
+                        path=vector_path,
+                        data_type="float32",
+                        dimensions=EMBEDDING_DIMENSIONS,
+                        distance_function="cosine",
+                    )
+                ]
+            )
 
         full_text_policy = FullTextPolicy(
             default_language=fts_policy_cfg["defaultLanguage"],
@@ -556,6 +631,28 @@ def replace_document_id(doc: Dict[str, Any], relative_path: str) -> Dict[str, An
     return doc
 
 
+def _load_jsonl_documents(jsonl_path: str) -> list[dict[str, Any]]:
+    """Load documents from a JSONL file, adding _source_line and deterministic id."""
+    documents: list[dict[str, Any]] = []
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, start=1):
+            payload = line.strip()
+            if not payload:
+                continue
+            try:
+                record = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                print(f"Error parsing JSONL line {line_num} in {jsonl_path}: {exc}")
+                continue
+            if not isinstance(record, dict):
+                continue
+            record['_source_line'] = line_num
+            source_key = f"{os.path.basename(jsonl_path)}:{line_num}"
+            record = replace_document_id(record, source_key)
+            documents.append(record)
+    return documents
+
+
 async def upload_document(container, doc: Dict[str, Any]) -> bool:
     """Upload a single document to Cosmos DB."""
     try:
@@ -587,12 +684,14 @@ async def main_async():
     """Main function to orchestrate the upload process."""
     parser = argparse.ArgumentParser(description="Upload JSON documents with embeddings to Cosmos DB")
     parser.add_argument(
-        "--folder",
-        "--documents-root",
-        dest="documents_root",
-        help="Path to folder containing JSON files to process (overrides config.yaml path selection)",
+        "--config",
+        default=None,
+        help="Path to config YAML file (default: config.yaml in script directory)",
     )
     args = parser.parse_args()
+
+    config_path = Path(args.config) if args.config else Path(__file__).parent / "config.yaml"
+    load_config(config_path)
 
     print("=" * 60)
     print("Cosmos DB Document Upload with OpenAI Embeddings")
@@ -620,12 +719,12 @@ async def main_async():
 
     if not EMBED_MODEL:
         print("❌ Error: Embedding model not configured.")
-        print("   Please set llm.embed_model in config.yaml.")
+        print("   Please set embedding.embed_model in config.yaml.")
         return
 
     if not EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings") and not EMBED_API_KEY:
         print("❌ Error: Azure OpenAI API key not configured.")
-        print("   Please set llm.embed_api_key (or llm.azure_openai_key) in config.yaml.")
+        print("   Please set embedding.embed_api_key in config.yaml.")
         return
 
     print(f"✓ Embedding endpoint: {EMBED_ENDPOINT}")
@@ -663,13 +762,6 @@ async def main_async():
     if not upload_targets:
         print("No upload targets configured. Nothing to upload.")
         return
-
-    if args.documents_root:
-        if not str(args.documents_root).strip():
-            print("❌ Error: --folder must have a non-empty value.")
-            return
-        for target in upload_targets:
-            target["documents_root"] = args.documents_root
 
     print("\n🔌 Initializing clients...")
     use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
@@ -740,65 +832,56 @@ async def main_async():
         embedding_field = str(target.get("embedding_field") or "e").strip()
         text_fields = target["embedding_text_fields"]
 
-        if not os.path.isdir(documents_root):
-            print(f"⚠ Skipping {target_name} upload: folder does not exist: {documents_root}")
+        # Load documents from source
+        is_jsonl = documents_root.endswith('.jsonl') and os.path.isfile(documents_root)
+
+        if is_jsonl:
+            container = database.get_container_client(container_name)
+            uploaded_containers.append(container_name)
+            print(f"✓ Connected to container '{container_name}' for {target_name} upload")
+            print(f"\n🔍 Loading JSONL ({target_name}): {documents_root}")
+            parse_start = time.perf_counter()
+            all_docs = await asyncio.to_thread(_load_jsonl_documents, documents_root)
+            total_parse_seconds += (time.perf_counter() - parse_start)
+            total_files_seen += len(all_docs)
+            print(f"✓ Loaded {len(all_docs)} documents from JSONL")
+        elif os.path.isdir(documents_root):
+            container = database.get_container_client(container_name)
+            uploaded_containers.append(container_name)
+            print(f"✓ Connected to container '{container_name}' for {target_name} upload")
+            print(f"\n🔍 Scanning for files in ({target_name}): {documents_root}")
+            input_files = await asyncio.to_thread(find_all_input_files, documents_root)
+            total_files_seen += len(input_files)
+            print(f"✓ Found {len(input_files)} files")
+            if not input_files:
+                print(f"⚠ No files found for {target_name}. Skipping.")
+                continue
+            all_docs = []
+            for file_path in tqdm(input_files, desc=f"Loading {target_name} files"):
+                parse_start = time.perf_counter()
+                doc = await load_json_document(file_path)
+                if doc is None or not isinstance(doc, dict):
+                    failed_uploads += 1
+                    total_parse_seconds += (time.perf_counter() - parse_start)
+                    continue
+                relative_path = os.path.relpath(file_path, documents_root)
+                doc['_source_file'] = relative_path
+                doc = replace_document_id(doc, relative_path)
+                all_docs.append(doc)
+                total_parse_seconds += (time.perf_counter() - parse_start)
+        else:
+            print(f"⚠ Skipping {target_name} upload: path does not exist: {documents_root}")
             continue
 
-        container = database.get_container_client(container_name)
-        uploaded_containers.append(container_name)
-        print(f"✓ Connected to container '{container_name}' for {target_name} upload")
-        print(f"\n🔍 Scanning for files in ({target_name}): {documents_root}")
-        input_files = await asyncio.to_thread(find_all_input_files, documents_root)
-        total_files_seen += len(input_files)
-        print(f"✓ Found {len(input_files)} files")
-
-        if not input_files:
-            print(f"⚠ No files found for {target_name}. Skipping.")
+        if not all_docs:
+            print(f"⚠ No documents loaded for {target_name}. Skipping.")
             continue
 
         print(f"\n📄 Processing {target_name} documents (batch size: {batch_size})...")
-        batch_docs = []
-        batch_texts = []
 
-        for file_path in tqdm(input_files, desc=f"Processing {target_name} files"):
-            parse_start = time.perf_counter()
-            doc = await load_json_document(file_path)
-            if doc is None:
-                failed_uploads += 1
-                total_parse_seconds += (time.perf_counter() - parse_start)
-                continue
-
-            relative_path = os.path.relpath(file_path, documents_root)
-            doc['_source_file'] = relative_path
-
-            doc = replace_document_id(doc, relative_path)
-
-            embedding_text = generate_embedding_text(doc, text_fields)
-            batch_docs.append(doc)
-            batch_texts.append(embedding_text)
-            total_parse_seconds += (time.perf_counter() - parse_start)
-
-            if len(batch_docs) >= batch_size:
-                try:
-                    embed_start = time.perf_counter()
-                    embeddings = await generate_embeddings_batch(embed_client, batch_texts)
-                    total_embed_seconds += (time.perf_counter() - embed_start)
-                    for item_doc, embedding in zip(batch_docs, embeddings):
-                        item_doc[embedding_field] = embedding
-
-                    upload_start = time.perf_counter()
-                    success_count, failed_count = await upload_documents_batch(container, batch_docs)
-                    total_upload_seconds += (time.perf_counter() - upload_start)
-                    successful_uploads += success_count
-                    failed_uploads += failed_count
-                except Exception as e:
-                    print(f"\nError processing {target_name} batch: {e}")
-                    failed_uploads += len(batch_docs)
-
-                batch_docs = []
-                batch_texts = []
-
-        if batch_docs:
+        for i in range(0, len(all_docs), batch_size):
+            batch_docs = all_docs[i:i + batch_size]
+            batch_texts = [generate_embedding_text(doc, text_fields) for doc in batch_docs]
             try:
                 embed_start = time.perf_counter()
                 embeddings = await generate_embeddings_batch(embed_client, batch_texts)
@@ -812,7 +895,7 @@ async def main_async():
                 successful_uploads += success_count
                 failed_uploads += failed_count
             except Exception as e:
-                print(f"\nError processing final {target_name} batch: {e}")
+                print(f"\nError processing {target_name} batch: {e}")
                 failed_uploads += len(batch_docs)
 
     # Summary
