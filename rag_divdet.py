@@ -271,6 +271,26 @@ from prompts import (
     EFFICIENT_SYNTHESIS_PROMPT,
 )
 
+preliminary_prefix = (str(CONFIG.get("pipeline", {}).get("preliminary_prefix")) or "").strip()
+preliminary_prefix = preliminary_prefix + "\n\n" if preliminary_prefix else ""
+subquery_prefix = (str(CONFIG.get("pipeline", {}).get("subquery_prefix")) or "").strip()
+subquery_prefix = subquery_prefix + "\n\n" if subquery_prefix else ""
+
+PRELIMINARY_PROMPT = preliminary_prefix + PRELIMINARY_PROMPT
+EFFICIENT_REGENERATE_PROMPT = subquery_prefix + EFFICIENT_REGENERATE_PROMPT
+SUBQUESTION_PROMPT = subquery_prefix + SUBQUESTION_PROMPT
+
+dataset_description = (str(CONFIG.get("pipeline", {}).get("dataset_description")) or "").strip()
+dataset_description = dataset_description + "\n\n" if dataset_description else ""
+
+SYNTHESIS_PROMPT = dataset_description + SYNTHESIS_PROMPT
+EFFICIENT_REGENERATE_PROMPT = dataset_description + EFFICIENT_REGENERATE_PROMPT
+EFFICIENT_SYNTHESIS_PROMPT = dataset_description + EFFICIENT_SYNTHESIS_PROMPT
+GAP_DECOMPOSE_PROMPT = dataset_description + GAP_DECOMPOSE_PROMPT
+REGENERATE_PROMPT = dataset_description + REGENERATE_PROMPT
+SUBQUESTION_PROMPT = dataset_description + SUBQUESTION_PROMPT
+PRELIMINARY_PROMPT = dataset_description + PRELIMINARY_PROMPT
+
 # =============================================================================
 # LLM CLIENT
 # =============================================================================

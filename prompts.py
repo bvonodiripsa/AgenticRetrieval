@@ -10,10 +10,10 @@ IMPORTANT RULES:
 5. Be precise and cite specific details from the context
 6. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
 
+Question: {question}
+
 Context Documents:
 {context}
-
-Question: {question}
 
 Provide your answer in the following format:
 
@@ -37,10 +37,10 @@ IMPORTANT RULES:
 7. Extract and include specific values, numbers, specifications, and technical details when available
 8. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
 
+Question: {question}
+
 Context Documents:
 {context}
-
-Question: {question}
 
 Provide a VERBOSE and COMPREHENSIVE answer that includes ALL relevant information from the context.
 Include specific details, values, and technical specifications where available.
@@ -184,11 +184,11 @@ Answers from successive retrieval rounds (each round retrieved additional contex
 {round_answers}
 
 Based on the above information, provide a comprehensive answer to the original question.
-Synthesize the information coherently, avoid repetition, and ensure the answer directly addresses the original question.
+Synthesize the information coherently, avoid repetition, and ensure the answer directly addresses the original question. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible.
 
 Prioritize information from later rounds as they address gaps identified in earlier answers.
 
-At the end, add a summary that directly answers the question in a concise way. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible
+At the end, add a summary that directly answers the question in a concise way. Try to cover as many aspects, obtained numeric values and specific details in the summary as possible.
 
 Format your response as:
 [Your comprehensive answer here]

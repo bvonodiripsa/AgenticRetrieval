@@ -17,6 +17,9 @@ pipeline:
   subq_fanout_cap: 3
   subq_max_concurrency: 2
   rounds: 5
+  preliminary_prefix: ""
+  subquery_prefix: ""
+  dataset_description: ""
 
 # Execution parameters
 execution:
