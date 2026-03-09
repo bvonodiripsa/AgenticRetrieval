@@ -1,29 +1,16 @@
-"""
-Create Synthetic Cosmos DB Collections
+"""Create Synthetic Cosmos DB Collections
 
-This script creates a Cosmos DB database and two small collections
-populated from JSONL sources in the repository data folder.
+This script creates a Cosmos DB database and containers populated from
+JSONL sources, as defined in tests/config.test.yaml.
 
-Collection 1: "articles"
-  Properties: title, author, category, body (all full-text indexed)
-
-Collection 2: "products"
-  Properties: name, brand, description, features (all full-text indexed)
-
-Both collections have a vector embedding property "e" (float32, 1024-dim,
-cosine, diskANN) whose value is generated from the concatenation of all four
-text fields, using the same Azure OpenAI embedding model and configuration
-defined in config.yaml (embedding section).
+Container names, partition keys, embedding fields, text fields, and JSONL
+source paths are all read from the ``cosmos.sources`` list in the config.
 
 Usage:
     python tests/create_synthetic_collections.py
-
-The script reads credentials and endpoint settings from config.yaml in the
-repository root, following the same pattern as cosmos_db_upload.py.
 """
 
 import asyncio
-import hashlib
 import json
 import sys
 import time
@@ -65,14 +52,13 @@ from openai import AsyncAzureOpenAI
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).parent.parent
-_CONFIG_PATH = _REPO_ROOT / "config.yaml"
+_CONFIG_PATH = Path(__file__).parent / "config.test.yaml"
 
 with open(_CONFIG_PATH) as _f:
     CONFIG = yaml.safe_load(_f)
 
 _COSMOS_CFG = CONFIG.get("cosmos", {})
-# Embedding section values take precedence over the llm section (mirrors cosmos_db_upload.py).
-_EMBED_CFG = {**CONFIG.get("llm", {}), **CONFIG.get("embedding", {})}
+_EMBED_CFG = CONFIG.get("embedding", {})
 
 COSMOS_ENDPOINT: str = str(_COSMOS_CFG.get("uri", "")).strip()
 COSMOS_KEY: str = str(_COSMOS_CFG.get("key", "")).strip()
@@ -86,84 +72,22 @@ AZURE_SUBSCRIPTION_ID: str = str(_COSMOS_CFG.get("azure_subscription_id", "")).s
 EMBED_ENDPOINT: str = str(_EMBED_CFG.get("embed_endpoint", "")).strip().strip('"')
 EMBED_MODEL: str = str(_EMBED_CFG.get("embed_model", "")).strip()
 EMBED_DIMENSIONS: int = int(_EMBED_CFG.get("embed_dimensions", 1024))
-# The embedding endpoint shares the LLM api_version (same Azure OpenAI service).
-EMBED_API_VERSION: str = str(CONFIG.get("llm", {}).get("api_version", "2024-05-01-preview"))
-EMBED_API_KEY: str = str(
-    _EMBED_CFG.get("embed_api_key") or CONFIG.get("llm", {}).get("azure_openai_key", "") or ""
-).strip()
+EMBED_API_VERSION: str = str(_EMBED_CFG.get("api_version", "2024-05-01-preview"))
+EMBED_API_KEY: str = str(_EMBED_CFG.get("embed_api_key", "") or "").strip()
 
 # Autoscale max throughput (RU/s) for each container
 AUTOSCALE_MAX_THROUGHPUT = 1000
 
 # ---------------------------------------------------------------------------
-# Collection definitions
+# Document loading
 # ---------------------------------------------------------------------------
 
-# Each collection spec:
-#   name            – Cosmos DB container name
-#   partition_key   – partition key path
-#   text_fields     – the four text properties (also full-text indexed)
-#   documents       – loaded from JSONL files in data/
-
-DATA_DIR = _REPO_ROOT / "data"
-COLLECTION_SPECS: list[dict[str, Any]] = [
-    {
-        "name": "articles",
-        "partition_key": "/pk",
-        "text_fields": ["title", "author", "category", "body"],
-    },
-    {
-        "name": "products",
-        "partition_key": "/pk",
-        "text_fields": ["name", "brand", "description", "features"],
-    },
-]
+SOURCES = _COSMOS_CFG.get("sources", [])
 
 
-def _to_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, (int, float, bool)):
-        return str(value)
-    if isinstance(value, (list, dict)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value).strip()
-
-
-def _extract_text_values(record: dict[str, Any]) -> list[str]:
-    values: list[str] = []
-    excluded = {"id", "pk", "e", "_rid", "_self", "_etag", "_attachments", "_ts"}
-    for key, value in record.items():
-        if key in excluded:
-            continue
-        text = _to_text(value)
-        if text:
-            values.append(text)
-    if not values:
-        values.append(json.dumps(record, ensure_ascii=False))
-    return values
-
-
-def _discover_jsonl_sources() -> list[Path]:
-    if not DATA_DIR.is_dir():
-        raise ValueError(f"Data directory does not exist: {DATA_DIR}")
-    sources = sorted(DATA_DIR.glob("*.jsonl"))
-    if len(sources) != len(COLLECTION_SPECS):
-        raise ValueError(
-            f"Expected {len(COLLECTION_SPECS)} JSONL source files in {DATA_DIR}, found {len(sources)}."
-        )
-    return sources
-
-
-def _load_documents_from_jsonl(
-    source_path: Path,
-    text_fields: list[str],
-    pk_prefix: str,
-) -> list[dict[str, Any]]:
+def _load_documents_from_jsonl(source_path: Path) -> list[dict[str, Any]]:
+    """Load documents from a JSONL file, preserving original field names."""
     documents: list[dict[str, Any]] = []
-    padded_rows = 0
     with source_path.open("r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, start=1):
             payload = line.strip()
@@ -175,42 +99,35 @@ def _load_documents_from_jsonl(
                 raise ValueError(
                     f"Invalid JSONL in {source_path} at line {line_num}: {exc}"
                 ) from exc
-
             if not isinstance(record, dict):
                 continue
-
-            text_values = _extract_text_values(record)
-            source_id = record.get("id") or record.get("pk") or hashlib.sha1(
-                payload.encode("utf-8")
-            ).hexdigest()
-            safe_source_id = str(source_id).replace("/", "-").replace(" ", "-")
-            mapped: dict[str, Any] = {"pk": f"{pk_prefix}-{safe_source_id}"}
-            if len(text_values) < len(text_fields):
-                padded_rows += 1
-            for idx, field in enumerate(text_fields):
-                mapped[field] = text_values[idx] if idx < len(text_values) else ""
-            documents.append(mapped)
-
+            documents.append(record)
     if not documents:
         raise ValueError(f"No JSON objects found in {source_path}.")
-    if padded_rows:
-        print(
-            f"⚠ {source_path.name}: {padded_rows} row(s) had fewer than {len(text_fields)} text values and were padded."
-        )
     return documents
 
 
-def _build_collection_specs_with_documents() -> list[dict[str, Any]]:
-    source_files = _discover_jsonl_sources()
+def _build_collection_specs() -> list[dict[str, Any]]:
+    """Build collection specs from config sources, loading JSONL documents."""
+    if not SOURCES:
+        raise ValueError("No sources defined in cosmos.sources config.")
     specs: list[dict[str, Any]] = []
-    for idx, spec in enumerate(COLLECTION_SPECS):
-        source_path = source_files[idx]
-        docs = _load_documents_from_jsonl(
-            source_path=source_path,
-            text_fields=spec["text_fields"],
-            pk_prefix=spec["name"],
-        )
-        specs.append({**spec, "source_path": str(source_path), "documents": docs})
+    for source in SOURCES:
+        documents_root = source.get("documents_root", "")
+        if not documents_root:
+            raise ValueError(f"Source '{source.get('id', '?')}' has no documents_root.")
+        source_path = _REPO_ROOT / documents_root
+        if not source_path.exists():
+            raise ValueError(f"JSONL source not found: {source_path}")
+        docs = _load_documents_from_jsonl(source_path)
+        specs.append({
+            "container_name": source["container_name"],
+            "partition_key_path": source.get("partition_key_path", "/id"),
+            "embedding_field": source.get("embedding_field", "e"),
+            "embedding_text_fields": source.get("embedding_text_fields", []),
+            "source_path": str(source_path),
+            "documents": docs,
+        })
     return specs
 
 # ---------------------------------------------------------------------------
@@ -218,7 +135,7 @@ def _build_collection_specs_with_documents() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _build_indexing_policy(text_fields: list[str]) -> dict[str, Any]:
+def _build_indexing_policy(text_fields: list[str], embedding_field: str = "e") -> dict[str, Any]:
     """Return the indexing policy dict for a collection with the given text fields."""
     return {
         "indexingMode": "consistent",
@@ -226,12 +143,12 @@ def _build_indexing_policy(text_fields: list[str]) -> dict[str, Any]:
         "includedPaths": [{"path": "/*"}],
         "excludedPaths": [
             {"path": "/\"_etag\"/?"},
-            {"path": "/e/*"},
+            {"path": f"/{embedding_field}/*"},
         ],
         "fullTextIndexes": [{"path": f"/{f}"} for f in text_fields],
         "vectorIndexes": [
             {
-                "path": "/e",
+                "path": f"/{embedding_field}",
                 "type": "diskANN",
                 "quantizationByteSize": 192,
                 "indexingSearchListSize": 100,
@@ -246,17 +163,6 @@ def _build_full_text_policy(text_fields: list[str]) -> dict[str, Any]:
         "fullTextPaths": [{"path": f"/{f}", "language": "en-US"} for f in text_fields],
     }
 
-
-_VECTOR_EMBEDDING_POLICY = {
-    "vectorEmbeddings": [
-        {
-            "path": "/e",
-            "dataType": "float32",
-            "dimensions": EMBED_DIMENSIONS,
-            "distanceFunction": "cosine",
-        }
-    ]
-}
 
 # ---------------------------------------------------------------------------
 # Azure helpers
@@ -331,18 +237,27 @@ def _container_exists_mgmt(mgmt: CosmosDBManagementClient, container_name: str) 
         raise
 
 
+def _is_serverless(mgmt: CosmosDBManagementClient) -> bool:
+    """Return True if the Cosmos DB account is serverless."""
+    account = mgmt.database_accounts.get(COSMOS_RESOURCE_GROUP, _get_account_name())
+    capabilities = {c.name for c in (account.capabilities or [])}
+    return "EnableServerless" in capabilities
+
+
 def _create_container(
     mgmt: CosmosDBManagementClient,
     container_name: str,
     partition_key: str,
     text_fields: list[str],
+    embedding_field: str = "e",
+    serverless: bool = False,
 ) -> None:
     account_name = _get_account_name()
     if _container_exists_mgmt(mgmt, container_name):
         print(f"  ✓ Container '{container_name}' already exists — skipping creation")
         return
 
-    ip_cfg = _build_indexing_policy(text_fields)
+    ip_cfg = _build_indexing_policy(text_fields, embedding_field)
     ftp_cfg = _build_full_text_policy(text_fields)
 
     indexing_policy = IndexingPolicy(
@@ -362,12 +277,11 @@ def _create_container(
     vector_policy = VectorEmbeddingPolicy(
         vector_embeddings=[
             VectorEmbedding(
-                path=v["path"],
-                data_type=v["dataType"],
-                dimensions=v["dimensions"],
-                distance_function=v["distanceFunction"],
+                path=f"/{embedding_field}",
+                data_type="float32",
+                dimensions=EMBED_DIMENSIONS,
+                distance_function="cosine",
             )
-            for v in _VECTOR_EMBEDDING_POLICY["vectorEmbeddings"]
         ]
     )
 
@@ -386,12 +300,18 @@ def _create_container(
         vector_embedding_policy=vector_policy,
         full_text_policy=full_text_policy,
     )
-    params = SqlContainerCreateUpdateParameters(
-        resource=resource,
-        options=CreateUpdateOptions(
-            autoscale_settings=AutoscaleSettings(max_throughput=AUTOSCALE_MAX_THROUGHPUT)
-        ),
-    )
+    if serverless:
+        params = SqlContainerCreateUpdateParameters(
+            resource=resource,
+            options=CreateUpdateOptions(),
+        )
+    else:
+        params = SqlContainerCreateUpdateParameters(
+            resource=resource,
+            options=CreateUpdateOptions(
+                autoscale_settings=AutoscaleSettings(max_throughput=AUTOSCALE_MAX_THROUGHPUT)
+            ),
+        )
 
     max_retries = 5
     retry_delay = 30
@@ -445,7 +365,7 @@ def _get_embed_client() -> AsyncAzureOpenAI:
         azure_endpoint = azure_endpoint.split("/openai/deployments/")[0]
     if not EMBED_API_KEY:
         raise ValueError(
-            "embed_api_key (or azure_openai_key) must be set in config.yaml for embedding generation"
+            "embedding.embed_api_key must be set in config for embedding generation"
         )
     return AsyncAzureOpenAI(
         azure_endpoint=azure_endpoint,
@@ -477,29 +397,29 @@ async def main() -> None:
 
     # Validate required config
     if not COSMOS_ENDPOINT:
-        print("❌ cosmos.uri is not set in config.yaml")
+        print("❌ cosmos.uri is not set in config")
         sys.exit(1)
     if not USE_RBAC_AUTH and not COSMOS_KEY:
         print("❌ cosmos.key is not set (or set cosmos.use_rbac_auth: true)")
         sys.exit(1)
     if not EMBED_ENDPOINT:
-        print("❌ embedding.embed_endpoint is not set in config.yaml")
+        print("❌ embedding.embed_endpoint is not set in config")
         sys.exit(1)
     if not EMBED_MODEL:
-        print("❌ embedding.embed_model is not set in config.yaml")
+        print("❌ embedding.embed_model is not set in config")
         sys.exit(1)
     if not EMBED_API_KEY:
-        print("❌ embedding.embed_api_key is not set in config.yaml")
+        print("❌ embedding.embed_api_key is not set in config")
         sys.exit(1)
 
     try:
-        collection_specs = _build_collection_specs_with_documents()
+        collection_specs = _build_collection_specs()
     except ValueError as exc:
         print(f"❌ {exc}")
         sys.exit(1)
     print("\n📚 Using JSONL sources:")
     for spec in collection_specs:
-        print(f"  - {spec['name']}: {spec['source_path']} ({len(spec['documents'])} docs)")
+        print(f"  - {spec['container_name']}: {spec['source_path']} ({len(spec['documents'])} docs)")
 
     # -----------------------------------------------------------------------
     # Step 1: Create database and containers via management plane
@@ -511,13 +431,18 @@ async def main() -> None:
         _ensure_capabilities(sync_cred)
         mgmt = CosmosDBManagementClient(sync_cred, AZURE_SUBSCRIPTION_ID)
         _create_database(mgmt)
+        serverless = _is_serverless(mgmt)
+        if serverless:
+            print("  ℹ  Serverless account detected — skipping autoscale throughput settings")
         for spec in collection_specs:
-            print(f"\n  Processing container '{spec['name']}'…")
+            print(f"\n  Processing container '{spec['container_name']}'…")
             _create_container(
                 mgmt,
-                container_name=spec["name"],
-                partition_key=spec["partition_key"],
-                text_fields=spec["text_fields"],
+                container_name=spec["container_name"],
+                partition_key=spec["partition_key_path"],
+                text_fields=spec["embedding_text_fields"],
+                embedding_field=spec["embedding_field"],
+                serverless=serverless,
             )
     else:
         print(
@@ -542,8 +467,10 @@ async def main() -> None:
         database = cosmos_client.get_database_client(DATABASE_NAME)
 
         for spec in collection_specs:
-            container_name: str = spec["name"]
-            text_fields: list[str] = spec["text_fields"]
+            container_name: str = spec["container_name"]
+            text_fields: list[str] = spec["embedding_text_fields"]
+            embedding_field: str = spec["embedding_field"]
+            pk_field: str = spec["partition_key_path"].lstrip("/")
             documents: list[dict[str, Any]] = spec["documents"]
 
             # Verify container is accessible
@@ -570,10 +497,10 @@ async def main() -> None:
             # Attach embeddings and upload
             uploaded = 0
             for doc, embedding in zip(documents, embeddings):
-                doc_with_embedding = {**doc, "e": embedding}
-                # Use the pk value as the document id for determinism
-                doc_with_embedding["id"] = doc["pk"]
-                await container.upsert_item(doc_with_embedding)
+                doc[embedding_field] = embedding
+                if pk_field not in doc:
+                    doc[pk_field] = doc.get("id", "")
+                await container.upsert_item(doc)
                 uploaded += 1
 
             print(f"  ✓ Uploaded {uploaded} documents to '{container_name}'")
