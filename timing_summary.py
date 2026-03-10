@@ -321,7 +321,7 @@ def main():
     timing_logs = find_timing_logs()
     if not timing_logs:
         raise RuntimeError(
-            "No timing logs found in out/. Run rag_divdet.py with --timing and capture output to a .log file in out/."
+            "No timing logs found in out/. Run agentic_retriever.py with --timing and capture output to a .log file in out/."
         )
 
     completed_logs: list[tuple[Path, str]] = []

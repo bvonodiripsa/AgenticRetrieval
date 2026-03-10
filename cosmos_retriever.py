@@ -1,4 +1,4 @@
-"""Cosmos DB retriever – extracted from rag_divdet.py for readability."""
+"""Cosmos DB retriever – extracted from agentic_retriever.py for readability."""
 
 import asyncio
 import copy
@@ -13,8 +13,8 @@ import numpy as np
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, DefaultAzureCredential
 
-import rag_divdet as _rag
-from rag_divdet import (
+import agentic_retriever as _rag
+from agentic_retriever import (
     _log_line,
     _format_activity_id_note,
     _multi_activity_reason,
@@ -46,7 +46,7 @@ def _ck(label: str, ref: float | None = None) -> float:
 # =============================================================================
 
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT", CONFIG["cosmos"]["uri"])
-COSMOS_KEY = os.getenv("COSMOS_KEY", CONFIG["cosmos"]["key"])
+COSMOS_KEY = os.getenv("COSMOS_KEY", CONFIG["cosmos"].get("key", ""))
 DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", CONFIG["cosmos"]["database_name"])
 
 
