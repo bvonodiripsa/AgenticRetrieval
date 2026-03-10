@@ -53,7 +53,6 @@ At minimum, set:
 - `cosmos.uri`
 - `cosmos.database_name`
 - `cosmos.sources` (one or more source entries)
-- `paths.questions_path`
 - `paths.output_root`
 
 Each entry in `cosmos.sources` is configured independently and includes:
@@ -90,23 +89,18 @@ Optional but recommended for auto-creating missing containers:
 Run:
 
 ```bash
-python cosmos_db_upload.py
+python cosmos_db_upload.py --config config.yaml
 ```
 
 Notes:
 
 - Upload target(s) are inferred from configured `cosmos.sources` entries with non-empty `documents_root`.
-- Override all configured source roots with one folder:
-
-```bash
-python cosmos_db_upload.py --folder /path/to/documents
-```
 
 ### 3) Run retrieval and generate answers
 
-Before running retrieval, prepare your questions file(s).
+Before running retrieval, prepare your questions file.
 
-The repository includes a sample file at `data/questions-answers.json` with this structure:
+The repository includes a sample file at `data/~questions-answers.json` with this structure:
 
 ```json
 [
@@ -123,18 +117,19 @@ How to use it:
 - Keep the same JSON array structure and field names (`question_id`, `question_text`, `answer`).
 - Replace `question_text` values with questions your own dataset should be able to answer.
 - Replace `answer` values with your own ground-truth answers (the expected/correct answers you define for evaluation).
-- Place your `.json` file(s) in the folder configured by `paths.questions_path`.
 
 Then run:
 
 ```bash
-python rag_divdet.py
+python rag_divdet.py --config config.yaml --questions-path path/to/questions.json
 ```
+
+Both `--config` and `--questions-path` are required. `--config` specifies the YAML configuration file; `--questions-path` points to a single `.json` file containing the question array.
 
 Typical limited smoke test:
 
 ```bash
-python rag_divdet.py --max-questions 1
+python rag_divdet.py --config config.yaml --questions-path data/~questions-answers.json --max-questions 1
 ```
 
 ### 4) Generate timing summary table
@@ -147,7 +142,7 @@ python timing_summary.py
 
 What this script does:
 
-- Runs a fresh timed benchmark (`rag_divdet.py --max-questions 5 --timing`).
+- Runs a fresh timed benchmark (`rag_divdet.py --config config.yaml --questions-path <questions_file> --max-questions 5 --timing`).
 - Parses key retrieval/LLM timing checkpoints from the terminal output.
 - Writes a timestamped log in `out/` (`timing_5q_rerun_<timestamp>.log`).
 - Updates `out/timing_5q_latest.log` with the newest run.
@@ -177,7 +172,7 @@ Outputs are written to:
 Add `--timing` to print a checkpoint line for every major operation as it completes:
 
 ```bash
-python rag_divdet.py --max-questions 1 --timing
+python rag_divdet.py --config config.yaml --questions-path data/~questions-answers.json --max-questions 1 --timing
 ```
 
 Each line has the form:
@@ -220,8 +215,9 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
     - optional `cosmos.cosmos_account_name`
 
 - **No questions processed / empty output**
-  - Confirm `paths.questions_path` points to a directory containing `.json` question files.
-  - Confirm `paths.output_root` is writable.
+  - Confirm `--questions-path` points to a `.json` file containing a JSON array of question objects.
+  - Each object must have `question_id` and `question_text` fields.
+  - Confirm `--output-root` (or `paths.output_root` in config) is writable.
 
 - **Config error: `cosmos.sources` missing/empty**
   - Both upload and retrieval now fail fast when `cosmos.sources` is not a non-empty list.

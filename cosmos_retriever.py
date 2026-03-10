@@ -46,7 +46,7 @@ def _ck(label: str, ref: float | None = None) -> float:
 # =============================================================================
 
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT", CONFIG["cosmos"]["uri"])
-COSMOS_KEY = os.getenv("COSMOS_KEY", CONFIG["cosmos"]["key"])
+COSMOS_KEY = os.getenv("COSMOS_KEY", CONFIG["cosmos"].get("key", ""))
 DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", CONFIG["cosmos"]["database_name"])
 
 

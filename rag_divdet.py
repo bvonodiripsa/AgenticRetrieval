@@ -221,10 +221,15 @@ class LRUCache:
             self._data.popitem(last=False)
 
 
-# Load config from yaml
-_CONFIG_PATH = Path(__file__).parent / "config.yaml"
-with open(_CONFIG_PATH) as _f:
-    CONFIG = yaml.safe_load(_f)
+# Config loaded at runtime via load_config(); do not import-time read.
+CONFIG: dict = {}
+
+
+def load_config(path: Path) -> None:
+    """Load (or reload) the YAML configuration into the module-level CONFIG dict."""
+    with open(path) as f:
+        CONFIG.clear()
+        CONFIG.update(yaml.safe_load(f))
 
 # =============================================================================
 # CONFIGURATION & DATA CLASSES
@@ -1147,21 +1152,23 @@ class DecomposedRAGPipeline:
 
 def load_questions(path: Path) -> dict[str, list[Question]]:
     questions: dict[str, list[Question]] = {}
-    for f in path.glob("*.json"):
-        if not f.stem or not f.stem[0].isalpha():
-            continue
-        if f.stem.startswith("_") or f.stem.endswith("_test_query"):
-            continue
-        data = json.loads(f.read_text(encoding="utf-8-sig"))
-        questions[f.stem] = [Question(q["question_id"], q["question_text"], f.stem, q.get("answer")) for q in data]
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    questions[path.stem] = [Question(q["question_id"], q["question_text"], path.stem, q.get("answer")) for q in data]
     return questions
 
 async def main_async():
+    # --- Phase 1: parse --config and load configuration -----------------------
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=Path, required=True, help="Path to config yaml file")
+    pre_args, _ = pre_parser.parse_known_args()
+    load_config(pre_args.config)
+
     from cosmos_retriever import CombinedRetriever, RETRIEVAL_SOURCES
 
+    # --- Phase 2: full argument parsing (defaults drawn from loaded config) ---
     parser = argparse.ArgumentParser()
     pipeline_cfg = CONFIG.get("pipeline", {})
-    parser.add_argument("--config", type=Path, default=None, help="Override config yaml path")
+    parser.add_argument("--config", type=Path, required=True, help="Path to config yaml file")
     parser.add_argument(
         "--k-fulltext",
         type=int,
@@ -1305,6 +1312,10 @@ async def main_async():
     await llm.close()
 
 if __name__ == "__main__":
+    # Ensure 'import rag_divdet' in other modules (e.g. cosmos_retriever)
+    # resolves to this same module instance, not a duplicate with empty CONFIG.
+    sys.modules.setdefault("rag_divdet", sys.modules[__name__])
+
     if "--timing" in sys.argv:
         class _TeeStream:
             def __init__(self, *streams):
