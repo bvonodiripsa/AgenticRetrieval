@@ -1312,9 +1312,9 @@ async def main_async():
     await llm.close()
 
 if __name__ == "__main__":
-    # Ensure 'import rag_divdet' in other modules (e.g. cosmos_retriever)
+    # Ensure 'import agentic_retriever' in other modules (e.g. cosmos_retriever)
     # resolves to this same module instance, not a duplicate with empty CONFIG.
-    sys.modules.setdefault("rag_divdet", sys.modules[__name__])
+    sys.modules.setdefault("agentic_retriever", sys.modules[__name__])
 
     if "--timing" in sys.argv:
         class _TeeStream:

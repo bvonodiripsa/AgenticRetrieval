@@ -7,7 +7,7 @@ DiverseRAG is a two-stage Azure Cosmos DB + Azure OpenAI pipeline:
    - Builds embeddings and stores them in field `e`.
    - Upserts documents into Cosmos DB containers with vector + full-text indexing support.
 
-2. **Retrieval + Answering (`rag_divdet.py`)**
+2. **Retrieval + Answering (`agentic_retriever.py`)**
    - Runs decomposed RAG using full-text retrieval, vector retrieval, and diversity selection.
    - Generates answers for question files and writes grouped outputs under `out/`.
 
@@ -121,7 +121,7 @@ How to use it:
 Then run:
 
 ```bash
-python rag_divdet.py --config config.yaml --questions-path path/to/questions.json
+python agentic_retriever.py --config config.yaml --questions-path path/to/questions.json
 ```
 
 Both `--config` and `--questions-path` are required. `--config` specifies the YAML configuration file; `--questions-path` points to a single `.json` file containing the question array.
@@ -129,7 +129,7 @@ Both `--config` and `--questions-path` are required. `--config` specifies the YA
 Typical limited smoke test:
 
 ```bash
-python rag_divdet.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
+python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
 ```
 
 ### 4) Generate timing summary table
@@ -142,7 +142,7 @@ python timing_summary.py
 
 What this script does:
 
-- Runs a fresh timed benchmark (`rag_divdet.py --config config.yaml --questions-path <questions_file> --max-questions 5 --timing`).
+- Runs a fresh timed benchmark (`agentic_retriever.py --config config.yaml --questions-path <questions_file> --max-questions 5 --timing`).
 - Parses key retrieval/LLM timing checkpoints from the terminal output.
 - Writes a timestamped log in `out/` (`timing_5q_rerun_<timestamp>.log`).
 - Updates `out/timing_5q_latest.log` with the newest run.
@@ -172,7 +172,7 @@ Outputs are written to:
 Add `--timing` to print a checkpoint line for every major operation as it completes:
 
 ```bash
-python rag_divdet.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
+python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
 ```
 
 Each line has the form:
@@ -186,7 +186,7 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 ## Repository layout
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert
-- `rag_divdet.py` — decomposed RAG retrieval/answer pipeline
+- `agentic_retriever.py` — decomposed RAG retrieval/answer pipeline
 - `timing_summary.py` — timed rerun + timing comparison table generation
 - `config.yaml.example` — full config template
 - `data/` — sample input corpus
