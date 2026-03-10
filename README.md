@@ -100,7 +100,7 @@ Notes:
 
 Before running retrieval, prepare your questions file.
 
-The repository includes a sample file at `data/~questions-answers.json` with this structure:
+The repository includes a sample file at `data/questions-answers.json` with this structure:
 
 ```json
 [
@@ -129,7 +129,7 @@ Both `--config` and `--questions-path` are required. `--config` specifies the YA
 Typical limited smoke test:
 
 ```bash
-python rag_divdet.py --config config.yaml --questions-path data/~questions-answers.json --max-questions 1
+python rag_divdet.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
 ```
 
 ### 4) Generate timing summary table
@@ -172,7 +172,7 @@ Outputs are written to:
 Add `--timing` to print a checkpoint line for every major operation as it completes:
 
 ```bash
-python rag_divdet.py --config config.yaml --questions-path data/~questions-answers.json --max-questions 1 --timing
+python rag_divdet.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
 ```
 
 Each line has the form:
