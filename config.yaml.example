@@ -84,6 +84,7 @@ cosmos:
   key: ""
   database_name: "divdet"
   use_rbac_auth: true
+  tenant_id: ""
 
   # Upload settings used by cosmos_db_upload.py
   cosmos_account_name: ""

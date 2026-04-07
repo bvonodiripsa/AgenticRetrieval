@@ -196,10 +196,17 @@ class CombinedRetriever:
 
     async def initialize(self):
         use_rbac_auth = CONFIG.get("cosmos", {}).get("use_rbac_auth", False)
-        if self._cosmos_az_login:
-            credential = AsyncAzureCliCredential()
+        tenant_id = str(CONFIG.get("cosmos", {}).get("tenant_id") or "").strip()
+        if self._cosmos_az_login or tenant_id:
+            credential = AsyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else AsyncAzureCliCredential()
             self._credential = credential
-            _log_line("✓ Using 'az login' (AzureCliCredential) authentication for Cosmos DB", kind="success")
+            if tenant_id:
+                _log_line(
+                    f"✓ Using tenant-scoped AzureCliCredential authentication for Cosmos DB ({tenant_id})",
+                    kind="success",
+                )
+            else:
+                _log_line("✓ Using 'az login' (AzureCliCredential) authentication for Cosmos DB", kind="success")
             self._cosmos = CosmosClient(COSMOS_ENDPOINT, credential=credential)
         elif use_rbac_auth:
             credential = DefaultAzureCredential()

@@ -311,10 +311,11 @@ class LLMClient:
         llm_cfg = CONFIG["llm"]
         # Embedding config: 'embedding' section overrides 'llm' section for backward compatibility
         embed_cfg = {**llm_cfg, **CONFIG.get("embedding", {})}
+        self._azure_az_login = azure_az_login
         self._use_rbac_auth = bool(llm_cfg["use_rbac_auth"])
         self._use_embed_rbac_auth = bool(embed_cfg.get("use_rbac_auth", False))
         token_scope = llm_cfg.get("token_scope")
-        self._token_scope = str(token_scope).strip()
+        self._token_scope = "" if token_scope is None else str(token_scope).strip()
         _shared_key = llm_cfg.get("azure_openai_key", "")
         self._llm_api_key = str(llm_cfg.get("llm_api_key") or _shared_key or "").strip()
         self._embed_api_key = str(embed_cfg.get("embed_api_key") or _shared_key or "").strip()
@@ -322,6 +323,10 @@ class LLMClient:
         self._api_key = _shared_key
         self._token_provider = None
         if self._use_rbac_auth or self._use_embed_rbac_auth:
+            if not self._token_scope:
+                raise ValueError(
+                    "llm.token_scope must be a non-empty string when llm.use_rbac_auth or embedding.use_rbac_auth is true"
+                )
             self._token_provider = get_bearer_token_provider(AzureCliCredential(), self._token_scope)
         self._llm_client = None
         self._embed_client = None
@@ -368,6 +373,8 @@ class LLMClient:
 
     def _switch_to_rbac_auth(self) -> None:
         self._use_rbac_auth = True
+        if not self._token_scope:
+            raise ValueError("llm.token_scope must be set before switching Azure OpenAI auth to RBAC")
         credential = AzureCliCredential() if self._azure_az_login else SyncDefaultAzureCredential()
         self._token_provider = get_bearer_token_provider(credential, self._token_scope)
         self._llm_client = None
