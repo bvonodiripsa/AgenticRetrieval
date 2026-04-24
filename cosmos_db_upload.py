@@ -972,7 +972,6 @@ async def main_async():
         print("   Please set embedding.embed_model or embedding.model in config.yaml.")
         return
 
-    if not EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings") and not EMBED_API_KEY and not EMBED_USE_RBAC:
     if (
         EMBED_API_FORMAT not in ("openai", "ollama")
         and not EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings")
@@ -1026,10 +1025,17 @@ async def main_async():
         print("\n📦 Ensuring Cosmos DB account and containers exist…")
         mgmt_credential = SyncDefaultAzureCredential()
         account_name = COSMOS_ACCOUNT_NAME or extract_account_name_from_endpoint(COSMOS_ENDPOINT)
-        from utils.cosmos_account import ensure_cosmos_account_exists
-        ensure_cosmos_account_exists(
-            mgmt_credential, AZURE_SUBSCRIPTION_ID, COSMOS_RESOURCE_GROUP, account_name,
-        )
+        try:
+            from utils.cosmos_account import ensure_cosmos_account_exists
+        except ModuleNotFoundError:
+            ensure_cosmos_account_exists = None
+
+        if ensure_cosmos_account_exists is None:
+            print("⚠ Skipping Cosmos DB account existence check: utils.cosmos_account is not available in this checkout.")
+        else:
+            ensure_cosmos_account_exists(
+                mgmt_credential, AZURE_SUBSCRIPTION_ID, COSMOS_RESOURCE_GROUP, account_name,
+            )
         try:
             create_database_and_container_via_management(mgmt_credential, upload_targets)
         except Exception as e:
