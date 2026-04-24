@@ -249,3 +249,5 @@ config.yaml
 out/
 out/*.*
 data/skf_full.json
+config.igmetall.yaml
+data/annotations.json

@@ -48,7 +48,7 @@ from azure.mgmt.cosmosdb.models import (
     FullTextPath,
     FullTextIndexPath,
 )
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from tqdm import tqdm
 import yaml
 from pathlib import Path
@@ -74,11 +74,13 @@ EMBED_API_VERSION: str = "2024-05-01-preview"
 EMBED_API_KEY: str = ""
 EMBED_USE_RBAC: bool = False
 EMBED_MAX_TOKENS: int = 8192
+EMBED_API_FORMAT: str = "azure-openai"
 EMBEDDING_BATCH_SIZE: int = 20
 VECTOR_EMBEDDING_POLICY: dict[str, Any] | None = None
 SOURCE_CONFIGS: list[dict[str, Any]] = []
 THROUGHPUT_MODE: str = "autoscale"   # "autoscale" or "manual"
-THROUGHPUT_VALUE: int = 1000         # max RU/s (autoscale) or fixed RU/s (manual)
+THROUGHPUT_VALUE: int = 4000         # max RU/s (autoscale) or fixed RU/s (manual)
+AUTOSCALE_MAX_THROUGHPUT: int = 4000  # 400 RU/s minimum throughput requires 4000 RU/s autoscale max
 
 
 def load_config(config_path: Path) -> None:
@@ -86,6 +88,7 @@ def load_config(config_path: Path) -> None:
     global CONFIG, COSMOS_ENDPOINT, COSMOS_KEY, DATABASE_NAME
     global COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP, AZURE_SUBSCRIPTION_ID
     global EMBED_ENDPOINT, EMBED_MODEL, EMBEDDING_DIMENSIONS, EMBED_API_VERSION, EMBED_API_KEY
+    global EMBED_API_FORMAT
     global EMBEDDING_BATCH_SIZE, VECTOR_EMBEDDING_POLICY, SOURCE_CONFIGS
     global THROUGHPUT_MODE, THROUGHPUT_VALUE
     global EMBED_USE_RBAC
@@ -102,9 +105,21 @@ def load_config(config_path: Path) -> None:
     AZURE_SUBSCRIPTION_ID = str(_cosmos_cfg.get("azure_subscription_id", "")).strip()
 
     _embed_cfg = CONFIG.get("embedding", {})
-    EMBED_ENDPOINT = str(_embed_cfg.get("embed_endpoint", "")).strip().strip('"')
-    EMBED_MODEL = str(_embed_cfg.get("embed_model", "")).strip()
-    EMBEDDING_DIMENSIONS = int(_embed_cfg.get("embed_dimensions", 1024))
+    EMBED_ENDPOINT = str(
+        _embed_cfg.get("embed_endpoint")
+        or _embed_cfg.get("endpoint")
+        or ""
+    ).strip().strip('"')
+    EMBED_MODEL = str(
+        _embed_cfg.get("embed_model")
+        or _embed_cfg.get("model")
+        or ""
+    ).strip()
+    EMBEDDING_DIMENSIONS = int(
+        _embed_cfg.get("embed_dimensions")
+        or _embed_cfg.get("dimensions")
+        or 1024
+    )
     EMBED_API_VERSION = str(_embed_cfg.get("api_version", "2024-05-01-preview"))
     EMBED_API_KEY = str(_embed_cfg.get("embed_api_key", "") or "").strip()
     EMBED_USE_RBAC = bool(_embed_cfg.get("use_rbac_auth", False))
@@ -114,6 +129,9 @@ def load_config(config_path: Path) -> None:
 
     global CONCURRENT_BATCHES
     CONCURRENT_BATCHES = int(_cosmos_cfg.get("concurrent_batches", 1))
+    EMBED_API_FORMAT = str(
+        _embed_cfg.get("api_format", "azure-openai") or "azure-openai"
+    ).strip().lower()
 
     EMBEDDING_BATCH_SIZE = int(_cosmos_cfg.get("embedding_batch_size", 20))
 
@@ -124,7 +142,7 @@ def load_config(config_path: Path) -> None:
         )
     THROUGHPUT_MODE = _throughput_mode_raw
 
-    _throughput_raw = _cosmos_cfg.get("throughput_value", 1000)
+    _throughput_raw = _cosmos_cfg.get("throughput_value", 4000)
     try:
         THROUGHPUT_VALUE = int(_throughput_raw)
     except (TypeError, ValueError):
@@ -136,6 +154,12 @@ def load_config(config_path: Path) -> None:
         raise ValueError(
             f"Invalid cosmos.throughput_value '{THROUGHPUT_VALUE}'. Must be a positive integer."
         )
+    if THROUGHPUT_MODE == "autoscale" and THROUGHPUT_VALUE < AUTOSCALE_MAX_THROUGHPUT:
+        print(
+            f"cosmos.throughput_value={THROUGHPUT_VALUE} is below the minimum autoscale max for 400 RU/s minimum throughput; "
+            f"using {AUTOSCALE_MAX_THROUGHPUT} instead."
+        )
+        THROUGHPUT_VALUE = AUTOSCALE_MAX_THROUGHPUT
     _vep_raw = _cosmos_cfg.get("vector_embedding_policy_json")
     if _vep_raw:
         VECTOR_EMBEDDING_POLICY = json.loads(_vep_raw) if isinstance(_vep_raw, str) else _vep_raw
@@ -153,6 +177,15 @@ def _as_list_of_strings(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _build_dedicated_throughput_options() -> CreateUpdateOptions:
+    """Create dedicated throughput options for new vector-enabled containers."""
+    if THROUGHPUT_MODE == "autoscale":
+        return CreateUpdateOptions(
+            autoscale_settings=AutoscaleSettings(max_throughput=THROUGHPUT_VALUE)
+        )
+    return CreateUpdateOptions(throughput=THROUGHPUT_VALUE)
 
 
 def _field_to_cosmos_json_path(field_name: str) -> str:
@@ -306,9 +339,17 @@ _embed_credential = None  # Stored for cleanup during shutdown
 def get_embedding_client() -> AsyncAzureOpenAI | None:
     """Initialize a single embedding client from llm.embed_endpoint/embed_model settings."""
     global _embed_credential
+def get_embedding_client() -> AsyncAzureOpenAI | AsyncOpenAI | None:
+    """Initialize a single embedding client for Azure, OpenAI-compatible, or Ollama endpoints."""
     endpoint = EMBED_ENDPOINT.rstrip("/")
     if endpoint.endswith("/api/embeddings"):
         return None
+
+    if EMBED_API_FORMAT == "openai":
+        return AsyncOpenAI(
+            base_url=endpoint,
+            api_key=EMBED_API_KEY or "local",
+        )
 
     azure_endpoint = endpoint
     if "/openai/deployments/" in azure_endpoint:
@@ -570,7 +611,7 @@ def create_database_and_container_via_management(credential, source_specs: List[
             ]
         )
 
-        print(f"\n  Creating container '{container_name}'...")
+        print(f"\n  Creating container '{container_name}' with dedicated {THROUGHPUT_MODE} throughput...")
         container_resource = SqlContainerResource(
             id=container_name,
             partition_key=ContainerPartitionKey(
@@ -590,6 +631,10 @@ def create_database_and_container_via_management(credential, source_specs: List[
             throughput_opts = CreateUpdateOptions(throughput=THROUGHPUT_VALUE)
         container_params = SqlContainerCreateUpdateParameters(
             resource=container_resource, options=throughput_opts
+        )
+        container_params = SqlContainerCreateUpdateParameters(
+            resource=container_resource,
+            options=_build_dedicated_throughput_options()
         )
 
         for attempt in range(max_retries):
@@ -651,7 +696,10 @@ def generate_embedding_text(doc: Dict[str, Any], text_fields: list[str]) -> str:
     return result
 
 
-async def generate_embeddings_batch(embed_client: AsyncAzureOpenAI | None, texts: List[str]) -> List[List[float]]:
+async def generate_embeddings_batch(
+    embed_client: AsyncAzureOpenAI | AsyncOpenAI | None,
+    texts: List[str],
+) -> List[List[float]]:
     """Generate embeddings for a batch of texts from a single configured endpoint/model."""
     if EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings"):
         batch_endpoint = EMBED_ENDPOINT.rstrip("/")
@@ -692,7 +740,7 @@ async def generate_embeddings_batch(embed_client: AsyncAzureOpenAI | None, texts
         return await asyncio.gather(*(embed_single(text) for text in texts))
 
     if embed_client is None:
-        raise ValueError("Embedding client is not initialized for Azure OpenAI endpoint")
+        raise ValueError("Embedding client is not initialized for the configured endpoint")
 
     response = await embed_client.embeddings.create(
         input=texts,
@@ -916,15 +964,20 @@ async def main_async():
     
     if not EMBED_ENDPOINT:
         print("❌ Error: Embedding endpoint not configured.")
-        print("   Please set llm.embed_endpoint in config.yaml.")
+        print("   Please set embedding.embed_endpoint or embedding.endpoint in config.yaml.")
         return
 
     if not EMBED_MODEL:
         print("❌ Error: Embedding model not configured.")
-        print("   Please set embedding.embed_model in config.yaml.")
+        print("   Please set embedding.embed_model or embedding.model in config.yaml.")
         return
 
     if not EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings") and not EMBED_API_KEY and not EMBED_USE_RBAC:
+    if (
+        EMBED_API_FORMAT not in ("openai", "ollama")
+        and not EMBED_ENDPOINT.rstrip("/").endswith("/api/embeddings")
+        and not EMBED_API_KEY
+    ):
         print("❌ Error: Azure OpenAI API key not configured.")
         print("   Please set embedding.embed_api_key in config.yaml or enable embedding.use_rbac_auth.")
         return
