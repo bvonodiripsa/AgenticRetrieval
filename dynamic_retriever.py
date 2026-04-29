@@ -43,8 +43,33 @@ def fmt(doc):
     ex = {"_rid","_self","_etag","_attachments","_ts","_score","e"} | _all_embed
     return "\n".join(f"{k}: {v}" for k,v in doc.items() if k not in ex and v)
 
+async def hyde_passage(query):
+    """Generate a hypothetical answer passage for HyDE embedding."""
+    prompt = f"Please write a passage to answer the question\nQuestion: {query}\nPassage:"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = await llm.chat.completions.create(
+                model=llm_cfg["llm_model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_completion_tokens=512,
+            )
+            return r.choices[0].message.content or query
+        except (oai.BadRequestError, oai.RateLimitError, oai.APIStatusError) as e:
+            print(f"  [HyDE] LLM error ({attempt}/{MAX_RETRIES}): {e}")
+            if attempt >= MAX_RETRIES:
+                print(f"  [HyDE] Max retries exceeded, falling back to raw query")
+                return query
+            await asyncio.sleep(min(5 * 2 ** attempt, 60))
+
 async def do_search(query, containers):
-    emb = await embed(query)
+    if USE_HYDE:
+        passage = await hyde_passage(query)
+        print(f"  [HyDE] Generated passage for embedding: {passage[:100]}...")
+        emb_hyde, emb_query = await asyncio.gather(embed(passage), embed(query))
+        emb = [(a + b) / 2.0 for a, b in zip(emb_hyde, emb_query)]
+    else:
+        emb = await embed(query)
     tasks = []
     for sid, ret in _source_cfg.items():
         if sid in containers:
@@ -64,19 +89,7 @@ async def do_search(query, containers):
     # Map ranked texts back to source docs by index
     text_to_idx = {id(t): i for i, t in enumerate(texts)}
     ranked_indices = [text_to_idx[id(t)] for t in ranked_texts]
-    return json.dumps([{"docid": all_d[i].get("id", ""), "snippet": ranked_texts[j][:2000]} for j, i in enumerate(ranked_indices)])
-
-async def do_get_doc(docid, containers):
-    for container_id, c in containers.items():
-        try:
-            async for item in c.query_items(query="SELECT * FROM c WHERE c.id=@id", parameters=[{"name":"@id","value":docid}]):
-                return json.dumps({"docid": docid, "text": fmt(item)})
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            print(f"  [get_document] Cosmos query failed for container={container_id}, docid={docid}: {e}")
-            continue
-    return json.dumps({"error": f"Not found: {docid}"})
+    return json.dumps([{"docid": all_d[i].get("id", ""), "text": ranked_texts[j]} for j, i in enumerate(ranked_indices)])
 
 async def do_prune(docids, containers, doc_cache):
     parts = []
@@ -103,9 +116,11 @@ async def do_prune(docids, containers, doc_cache):
     return "Pruned context (only these documents remain):\n\n" + "\n\n".join(parts)
 
 TOOLS = [
-    {"type":"function","function":{"name":"search","description":"Search knowledge base. Returns top results with docid and snippet.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
-    {"type":"function","function":{"name":"get_document","description":"Get full document by docid.","parameters":{"type":"object","properties":{"docid":{"type":"string"}},"required":["docid"]}}},
+    {"type":"function","function":{"name":"initial_search","description":"Search the knowledge base using the original question. Must be called first and alone (no other tool calls in the same batch). Returns top results with docid and full document text.","parameters":{"type":"object","properties":{},"required":[]}}},
+    {"type":"function","function":{"name":"search","description":"Search knowledge base with a custom query. Returns top results with docid and full document text.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
     {"type":"function","function":{"name":"prune","description":"Keep only the specified most relevant document IDs and discard all others from context. Use when context is large to free up space for more searches.","parameters":{"type":"object","properties":{"docids":{"type":"array","items":{"type":"string"},"description":"List of document IDs to keep"}},"required":["docids"]}}},
+    {"type":"function","function":{"name":"find_information_gaps","description":"Identify information gaps in the retrieved documents that need to be addressed to answer the question. The tool can see all retrieved documents in the conversation. Returns a list of gaps to guide follow-up searches.","parameters":{"type":"object","properties":{},"required":[]}}},
+    {"type":"function","function":{"name":"final_answer","description":"Submit the final answer to the question. Must be called alone when you are ready to answer.","parameters":{"type":"object","properties":{"answer":{"type":"string","description":"The complete final answer to the question"}},"required":["answer"]}}},
 ]
 
 async def process_question(q_obj, containers):
@@ -114,16 +129,38 @@ async def process_question(q_obj, containers):
     qid = q_obj.get("question_id", "")
     print(f"\n{'='*60}\n[{qid}]: {query}\n{'='*60}")
     msgs = [{"role": "user", "content": QUERY_TEMPLATE.format(question=query)}]
-    tc = {"search": 0, "get_document": 0, "prune": 0}
+    tc = {"initial_search": 0, "search": 0, "prune": 0, "find_information_gaps": 0, "final_answer": 0}
     doc_cache = {}
     initial_msg = msgs[0]
     retries = 0
+    non_prune_rounds = 0
     for iteration in range(50):
         try:
-            r = await llm.chat.completions.create(model=llm_cfg["llm_model"], messages=msgs, tools=TOOLS, tool_choice="auto", temperature=llm_cfg.get("temperature", 0), max_completion_tokens=llm_cfg["max_completion_tokens"])
+            r = await llm.chat.completions.create(model=llm_cfg["llm_model"], messages=msgs, tools=TOOLS, temperature=llm_cfg.get("temperature", 0), max_completion_tokens=llm_cfg["max_completion_tokens"])
             retries = 0
         except (oai.BadRequestError, oai.RateLimitError, oai.APIStatusError) as e:
             retries += 1; print(f"  LLM error ({retries}/{MAX_RETRIES}): {e}")
+            # On context overflow: roll back messages until under limit, then force prune
+            if "context_length_exceeded" in str(e):
+                print(f"  [auto-prune] Context overflow detected, rolling back messages...")
+                # Remove messages from the end until we fit (keep at least initial_msg)
+                while len(msgs) > 1 and count_tokens(msgs) > CONTEXT_LIMIT * 0.8:
+                    msgs.pop()
+                # Ensure we don't leave an orphaned assistant message with tool_calls
+                # (the API requires tool response messages for every tool_call_id)
+                while len(msgs) > 1:
+                    last = msgs[-1]
+                    if isinstance(last, dict) and last.get("role") == "assistant" and last.get("tool_calls"):
+                        msgs.pop()
+                    elif isinstance(last, dict) and last.get("role") == "tool":
+                        msgs.pop()
+                    else:
+                        break
+                # Force a prune call on next iteration
+                msgs.append({"role": "user", "content": "CRITICAL: Context limit exceeded. You MUST call prune NOW to keep only the most relevant document IDs before doing anything else."})
+                print(f"  [auto-prune] Rolled back to {count_tokens(msgs)} tokens, forcing prune")
+                retries = 0  # reset retries since we changed the messages
+                continue
             if retries >= MAX_RETRIES:
                 elapsed = round(time.perf_counter() - t0, 2)
                 print(f"  Max retries ({MAX_RETRIES}) exceeded, returning partial result")
@@ -143,8 +180,22 @@ async def process_question(q_obj, containers):
                     "tool_calls": tc}
         for t in m.tool_calls:
             tc[t.function.name] = tc.get(t.function.name, 0) + 1
-        # Enforce: prune must be the sole tool call in a turn
+        # Handle final_answer tool call
         call_names = [t.function.name for t in m.tool_calls]
+        if "final_answer" in call_names:
+            fa_call = next(t for t in m.tool_calls if t.function.name == "final_answer")
+            try:
+                a = json.loads(fa_call.function.arguments)
+                answer = a.get("answer", "")
+            except (json.JSONDecodeError, TypeError):
+                answer = ""
+            print(f"  Answer (via final_answer): {answer[:200]}...")
+            elapsed = round(time.perf_counter() - t0, 2)
+            print(f"  Elapsed: {elapsed}s")
+            return {"question_id": qid, "query": query, "answer": answer, "ground_truth": q_obj.get("answer",""),
+                    "model": llm_cfg["llm_model"], "rounds": iteration+1, "elapsed_seconds": elapsed,
+                    "tool_calls": tc}
+        # Enforce: prune must be the sole tool call in a turn
         if "prune" in call_names and len(call_names) > 1:
             print(f"  [warn] prune mixed with other calls; returning error for non-prune calls")
             for t in m.tool_calls:
@@ -171,30 +222,62 @@ async def process_question(q_obj, containers):
                 a = json.loads(t.function.arguments)
             except (json.JSONDecodeError, TypeError) as e:
                 return t, json.dumps({"error": f"Malformed tool arguments: {e}"}), False
-            if t.function.name == "search":
+            if t.function.name == "initial_search":
+                out = await do_search(query, containers)
+                try:
+                    for h in json.loads(out):
+                        if h.get("text"):
+                            doc_cache[h["docid"]] = h["text"]
+                except asyncio.CancelledError: raise
+                except Exception as e:
+                    print(f"  [initial_search] failed to parse/cache search results: {e}")
+            elif t.function.name == "search":
                 out = await do_search(a["query"], containers)
                 try:
                     for h in json.loads(out):
-                        if h.get("snippet"): doc_cache[h["docid"]] = h["snippet"]
+                        if h.get("text"):
+                            doc_cache[h["docid"]] = h["text"]
                 except asyncio.CancelledError: raise
                 except Exception as e:
                     print(f"  [search] failed to parse/cache search results: {e}")
-            elif t.function.name == "get_document":
-                out = await do_get_doc(a["docid"], containers)
-                try:
-                    d = json.loads(out)
-                    if d.get("text"): doc_cache[d["docid"]] = d["text"]
-                except asyncio.CancelledError: raise
-                except Exception as e:
-                    print(f"  [get_document] failed to parse/cache doc result for {a.get('docid','?')}: {e}")
             elif t.function.name == "prune":
                 out = await do_prune(a["docids"], containers, doc_cache)
                 return t, out, True  # signal prune
+            elif t.function.name == "find_information_gaps":
+                # Ask the LLM to identify gaps using the current conversation context
+                # Strip assistant messages with tool_calls and their tool responses
+                gap_msgs = [m for m in msgs if not (isinstance(m, dict) and (
+                    (m.get("role") == "assistant" and m.get("tool_calls")) or
+                    m.get("role") == "tool"
+                ))]
+                gap_msgs.append({"role": "user", "content": "Based on the retrieved documents above and the original question, identify specific information gaps that are not covered and need to be addressed. Return a concise numbered list of missing pieces of information."})
+                try:
+                    gap_r = await llm.chat.completions.create(
+                        model=llm_cfg["llm_model"],
+                        messages=gap_msgs,
+                        temperature=llm_cfg.get("temperature", 0),
+                        max_completion_tokens=1024,
+                    )
+                    out = gap_r.choices[0].message.content or "No gaps identified."
+                except (oai.BadRequestError, oai.RateLimitError, oai.APIStatusError) as e:
+                    print(f"  [find_gaps] LLM error: {e}")
+                    out = json.dumps({"error": str(e)})
+                print(f"  [find_gaps] {out[:200]}")
             else:
                 out = json.dumps({"error": f"Unknown tool: {t.function.name}"})
             return t, out, False
-        print(f"  Executing {len(m.tool_calls)} tool calls in parallel...")
-        results = await asyncio.gather(*(_exec(t) for t in m.tool_calls))
+        # Enforce: initial_search must be alone
+        if "initial_search" in call_names and len(call_names) > 1:
+            print(f"  [warn] initial_search mixed with other calls; returning error for non-initial_search calls")
+            for t in m.tool_calls:
+                if t.function.name != "initial_search":
+                    msgs.append({"role": "tool", "tool_call_id": t.id,
+                                 "content": json.dumps({"error": "initial_search must be the only tool call in the first batch; re-issue this call separately."})})
+            m_tool_calls = [t for t in m.tool_calls if t.function.name == "initial_search"]
+        else:
+            m_tool_calls = m.tool_calls
+        print(f"  Executing {len(m_tool_calls)} tool calls in parallel...")
+        results = await asyncio.gather(*(_exec(t) for t in m_tool_calls))
         pruned = False
         for t, out, is_prune in results:
             if is_prune:
@@ -215,12 +298,34 @@ async def process_question(q_obj, containers):
             msgs.append({"role": "tool", "tool_call_id": t.id, "content": out})
             try:
                 a = json.loads(t.function.arguments)
-                print(f"  [{t.function.name}] {list(a.values())[0][:80] if isinstance(list(a.values())[0], str) else '...'}")
+                vals = list(a.values())
+                print(f"  [{t.function.name}] {vals[0][:80] if vals and isinstance(vals[0], str) else '...'}")
             except (json.JSONDecodeError, TypeError):
                 print(f"  [{t.function.name}] (malformed args)")
+        non_prune_rounds += 1
         token_est = count_tokens(msgs)
-        msgs.append({"role": "user", "content": f"Token usage: {token_est} / {CONTEXT_LIMIT}"})
-        print(f"  Token usage: {token_est} / {CONTEXT_LIMIT}")
+        # If tool results pushed us over the limit, auto-prune immediately
+        if token_est > CONTEXT_LIMIT * 0.8 and doc_cache:
+            all_ids = list(doc_cache.keys())
+            if len(all_ids) > PRUNE_K:
+                doc_texts = [doc_cache[did] for did in all_ids]
+                ranked_texts = await rerank(query, doc_texts, PRUNE_K)
+                text_id_map = {id(doc_texts[i]): all_ids[i] for i in range(len(all_ids))}
+                keep_ids = [text_id_map[id(t)] for t in ranked_texts if id(t) in text_id_map]
+            else:
+                keep_ids = all_ids
+            parts = [f'<doc id="{did}">\n{doc_cache[did]}\n</doc>' for did in keep_ids]
+            pruned_ctx = "Pruned context (only these documents remain):\n\n" + "\n\n".join(parts)
+            msgs.clear()
+            msgs.append(initial_msg)
+            msgs.append({"role": "assistant", "content": "I'll prune the context to focus on the most relevant documents."})
+            msgs.append({"role": "user", "content": pruned_ctx})
+            token_est_new = count_tokens(msgs)
+            tc["prune"] = tc.get("prune", 0) + 1
+            print(f"  [auto-prune] Token overflow after tool results ({token_est} tokens), kept {len(keep_ids)} docs, reset to {token_est_new} tokens")
+            token_est = token_est_new
+        msgs.append({"role": "user", "content": f"Token usage: {token_est} / {CONTEXT_LIMIT}. Non-prune tool calls since start: {non_prune_rounds}"})
+        print(f"  Token usage: {token_est} / {CONTEXT_LIMIT}. Non-prune rounds: {non_prune_rounds}")
     elapsed = round(time.perf_counter() - t0, 2)
     return {"question_id": qid, "query": query, "answer": "", "ground_truth": q_obj.get("answer",""),
             "model": llm_cfg["llm_model"], "rounds": 50, "elapsed_seconds": elapsed, "tool_calls": tc}
@@ -269,6 +374,7 @@ if __name__ == "__main__":
     MAX_RETRIES, RERANK_MUL = int(llm_cfg["max_retries"]), cfg["ranker"]["rerank_multiplier"]
     PRUNE_K = cfg.get("prune_k", 20)
     CONTEXT_LIMIT = llm_cfg.get("context_limit", 270000)
+    USE_HYDE = cfg["hyde"]
 
     # Clients
     tp = get_bearer_token_provider(AzureCliCredential(), llm_cfg["token_scope"]) if llm_cfg["use_rbac_auth"] else None
@@ -293,15 +399,15 @@ if __name__ == "__main__":
         _r_hdr = {"Authorization": f"Bearer {_r_tok}", "Content-Type": "application/json"}
         _r_http = httpx.AsyncClient(timeout=120)
 
-    QUERY_TEMPLATE = """You are a deep research agent. Answer the question by using the search, get_document, and prune tools. Search multiple times with diverse queries. Do not give up early.
+        # Register ranker account (idempotent – safe to call every time)
+        from utils.ranker import register_ranker_account
+        asyncio.run(register_ranker_account(
+            region=str(rcfg.get("region", "")).strip(),
+            account_name=str(rcfg.get("account_name", "")).strip(),
+            register_account_path=str(rcfg.get("register_account_path", "")).strip(),
+            access_token=_r_tok,
+        ))
 
-Available tools:
-- search(query): Search the knowledge base. Returns top results with docid and snippet.
-- get_document(docid): Get full document text by docid.
-- prune(docids): Keep only the specified documents (up to """ + str(PRUNE_K) + """) and discard the rest from context. Use this when context is getting large to focus on the most relevant documents.
-
-Question: {question}
-
-Format: Explanation: ... Exact Answer: ... Confidence: N%"""
+    QUERY_TEMPLATE = cfg["query_template"].replace("{prune_k}", str(PRUNE_K))
 
     asyncio.run(main())
