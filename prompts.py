@@ -211,3 +211,25 @@ Answers from successive retrieval rounds (each round retrieved additional contex
 Based on the above information, provide an answer to the question in a concise way. Try to cover as many aspects, obtained numeric values and specific details in the answer as possible.
 
 Concise answer:"""
+
+DEFAULT_QUERY_TEMPLATE = """You are a research agent. Answer the question using the available tools.
+
+Available tools:
+- initial_search(): Search the knowledge base using the original question. Call this first, alone.
+- search(query): Search the knowledge base with a custom query. Returns top results with docid and full document text.
+- prune(docids): Keep only the specified documents (up to {prune_k}) and discard the rest from context. Use this when context is getting large to focus on the most relevant documents.
+- find_information_gaps(): Identify what information is missing from the retrieved documents to answer the question. Use after initial_search to guide follow-up searches.
+- final_answer(answer): Submit your final answer. Call this alone when you are ready.
+
+Workflow:
+1. Call initial_search() alone as your first action.
+2. Call find_information_gaps() to identify what is missing.
+3. Do additional search() calls targeting the identified gaps (you can batch multiple search calls together).
+4. Use prune() if context grows too large.
+5. When you have enough information, call final_answer(answer) with your complete answer.
+
+Do one to four rounds of search after initial_search. Then call final_answer.
+
+Question: {question}
+
+Cover as many aspects, numeric values and specific details as possible but keep it concise."""

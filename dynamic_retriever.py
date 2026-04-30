@@ -408,6 +408,7 @@ if __name__ == "__main__":
             access_token=_r_tok,
         ))
 
-    QUERY_TEMPLATE = cfg["query_template"].replace("{prune_k}", str(PRUNE_K))
+    from prompts import DEFAULT_QUERY_TEMPLATE
+    QUERY_TEMPLATE = DEFAULT_QUERY_TEMPLATE.replace("{prune_k}", str(PRUNE_K))
 
     asyncio.run(main())
