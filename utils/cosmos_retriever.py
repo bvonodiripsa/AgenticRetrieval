@@ -253,7 +253,17 @@ class CombinedRetriever:
         if top_k <= 0 or not fields:
             return []
         t = _ck(f"fulltext (top {top_k}, {container.id}, {len(fields)} fields) – start")
-        items = await fulltext_search(container, fields, query, top_k)
+
+        def _log_fulltext_sql(sql: str, k: int, text: str) -> None:
+            if _timing_enabled():
+                _log_line(
+                    f"  fulltext SQL ({container.id}): {sql}  "
+                    f"[top_k={k}, text={text!r}]",
+                    kind="query",
+                    use_lock=True,
+                )
+
+        items = await fulltext_search(container, fields, query, top_k, log_fn=_log_fulltext_sql)
         _ck(f"fulltext – done ({len(items)} results, {container.id})", t)
         return items
 

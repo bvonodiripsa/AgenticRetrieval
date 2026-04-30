@@ -275,8 +275,11 @@ if __name__ == "__main__":
     llm = AsyncAzureOpenAI(api_version=llm_cfg["api_version"], azure_endpoint=llm_cfg["llm_endpoint"],
         **({"azure_ad_token_provider": tp} if tp else {"api_key": llm_cfg["llm_api_key"]}))
     embed_tp = get_bearer_token_provider(AzureCliCredential(), embed_cfg["token_scope"]) if embed_cfg.get("use_rbac_auth") else None
-    embed_client = AsyncAzureOpenAI(api_version=embed_cfg["api_version"], azure_endpoint=embed_cfg["embed_endpoint"],
-        **({"azure_ad_token_provider": embed_tp} if embed_tp else {"api_key": embed_cfg["embed_api_key"]}))
+    if embed_cfg.get("use_rbac_auth") or embed_cfg.get("embed_api_key"):
+        embed_client = AsyncAzureOpenAI(api_version=embed_cfg["api_version"], azure_endpoint=embed_cfg["embed_endpoint"],
+            **({"azure_ad_token_provider": embed_tp} if embed_tp else {"api_key": embed_cfg["embed_api_key"]}))
+    else:
+        embed_client = oai.AsyncOpenAI(base_url=embed_cfg["embed_endpoint"], api_key="ollama")
 
     # Ranker
     rcfg = cfg["ranker"]
