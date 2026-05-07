@@ -59,6 +59,7 @@ llm:
   use_rbac_auth: true
   token_scope: ""
   llm_api_key: ""
+  tenant_id: ""
 
 # Local LLM fallback settings (used for sub-tasks when use_local_fallback_for_subtasks is true)
 local_llm:
@@ -71,6 +72,7 @@ local_llm:
 embedding:
   embed_endpoint: ""
   api_version: "2024-05-01-preview"
+  api_format: "openai"
   embed_model: ""
   embed_dimensions: 1024
   embed_cache_size: 4096
@@ -90,7 +92,8 @@ cosmos:
   cosmos_account_name: ""
   cosmos_resource_group: ""
   azure_subscription_id: ""
-  embedding_batch_size: 20
+  concurrent_batches: 4
+  embedding_batch_size: 100
 
   # Throughput settings for new containers (used when dedicated throughput is required)
   throughput_mode: "autoscale"   # "autoscale" or "manual"

@@ -1235,12 +1235,19 @@ async def main_async():
                 all_docs = []
                 for file_path in tqdm(input_files, desc=f"Loading {target_name} files"):
                     parse_start = time.perf_counter()
+                    relative_path = os.path.relpath(file_path, documents_root)
+                    if file_path.lower().endswith('.jsonl'):
+                        jsonl_docs = await asyncio.to_thread(_load_jsonl_documents, file_path)
+                        for jdoc in jsonl_docs:
+                            jdoc['_source_file'] = relative_path
+                        all_docs.extend(jsonl_docs)
+                        total_parse_seconds += (time.perf_counter() - parse_start)
+                        continue
                     doc = await load_json_document(file_path)
                     if doc is None or not isinstance(doc, dict):
                         failed_uploads += 1
                         total_parse_seconds += (time.perf_counter() - parse_start)
                         continue
-                    relative_path = os.path.relpath(file_path, documents_root)
                     doc['_source_file'] = relative_path
                     doc = replace_document_id(doc, relative_path)
                     all_docs.append(doc)

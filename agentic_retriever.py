@@ -314,6 +314,7 @@ class LLMClient:
         self._azure_az_login = azure_az_login
         self._use_rbac_auth = bool(llm_cfg["use_rbac_auth"])
         self._use_embed_rbac_auth = bool(embed_cfg.get("use_rbac_auth", False))
+        self._llm_tenant_id = str(llm_cfg.get("tenant_id", "") or "").strip()
         token_scope = llm_cfg.get("token_scope")
         self._token_scope = "" if token_scope is None else str(token_scope).strip()
         _shared_key = llm_cfg.get("azure_openai_key", "")
@@ -327,7 +328,12 @@ class LLMClient:
                 raise ValueError(
                     "llm.token_scope must be a non-empty string when llm.use_rbac_auth or embedding.use_rbac_auth is true"
                 )
-            self._token_provider = get_bearer_token_provider(AzureCliCredential(), self._token_scope)
+            cli_credential = (
+                AzureCliCredential(tenant_id=self._llm_tenant_id)
+                if self._llm_tenant_id
+                else AzureCliCredential()
+            )
+            self._token_provider = get_bearer_token_provider(cli_credential, self._token_scope)
         self._llm_client = None
         self._embed_client = None
         self._embed_http_client = None
@@ -375,7 +381,14 @@ class LLMClient:
         self._use_rbac_auth = True
         if not self._token_scope:
             raise ValueError("llm.token_scope must be set before switching Azure OpenAI auth to RBAC")
-        credential = AzureCliCredential() if self._azure_az_login else SyncDefaultAzureCredential()
+        if self._azure_az_login:
+            credential = (
+                AzureCliCredential(tenant_id=self._llm_tenant_id)
+                if self._llm_tenant_id
+                else AzureCliCredential()
+            )
+        else:
+            credential = SyncDefaultAzureCredential()
         self._token_provider = get_bearer_token_provider(credential, self._token_scope)
         self._llm_client = None
         self._embed_client = None
@@ -729,6 +742,10 @@ class LLMClient:
                 await asyncio.sleep(wait)
             except openai.BadRequestError as e:
                 error_text = str(e)
+                _log_line(
+                    f"BadRequestError details on {label}: {error_text[:400]}",
+                    kind="warn",
+                )
                 self._update_hints_from_badrequest(error_text)
                 err_text = error_text.lower()
                 prior_completion_tokens = max_completion_tokens
