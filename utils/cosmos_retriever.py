@@ -241,6 +241,8 @@ class CombinedRetriever:
                 )
                 if ok:
                     _log_line(f"✓ Ranker account '{self._ranker_account}' registered", kind="success")
+                else:
+                    _log_line(f"✗ Ranker account '{self._ranker_account}' registration failed", kind="error")
 
     async def _fulltext_search(self, container, fields: list[str], query: str, top_k: int) -> list[dict]:
         if top_k <= 0 or not fields:

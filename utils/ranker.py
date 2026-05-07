@@ -68,6 +68,9 @@ async def register_ranker_account(
     """Register ranker account (idempotent). Returns True on success."""
     if not region or not account_name or not register_account_path:
         return False
+    if not access_token or not access_token.strip():
+        print("  [ranker] Access token is empty, cannot register ranker account")
+        return False
     url = f"https://{region}.{register_account_path}"
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     payload = {"AccountName": account_name, "Region": region}

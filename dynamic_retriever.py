@@ -183,12 +183,22 @@ async def process_question(q_obj, containers):
         # Handle final_answer tool call
         call_names = [t.function.name for t in m.tool_calls]
         if "final_answer" in call_names:
+            # Enforce: final_answer must be the sole tool call in a turn
+            if len(call_names) > 1:
+                print(f"  [warn] final_answer mixed with other calls; returning error for non-final_answer calls")
+                for t in m.tool_calls:
+                    if t.function.name != "final_answer":
+                        msgs.append({"role": "tool", "tool_call_id": t.id,
+                                     "content": json.dumps({"error": "final_answer must be the only tool call in a turn; re-issue this call separately."})})
             fa_call = next(t for t in m.tool_calls if t.function.name == "final_answer")
             try:
                 a = json.loads(fa_call.function.arguments)
                 answer = a.get("answer", "")
             except (json.JSONDecodeError, TypeError):
                 answer = ""
+            # Append a tool response for final_answer to keep the conversation state valid
+            msgs.append({"role": "tool", "tool_call_id": fa_call.id,
+                         "content": json.dumps({"status": "ok"})})
             print(f"  Answer (via final_answer): {answer[:200]}...")
             elapsed = round(time.perf_counter() - t0, 2)
             print(f"  Elapsed: {elapsed}s")
@@ -244,12 +254,30 @@ async def process_question(q_obj, containers):
                 out = await do_prune(a["docids"], containers, doc_cache)
                 return t, out, True  # signal prune
             elif t.function.name == "find_information_gaps":
-                # Ask the LLM to identify gaps using the current conversation context
-                # Strip assistant messages with tool_calls and their tool responses
-                gap_msgs = [m for m in msgs if not (isinstance(m, dict) and (
-                    (m.get("role") == "assistant" and m.get("tool_calls")) or
-                    m.get("role") == "tool"
-                ))]
+                # Ask the LLM to identify gaps using the current conversation context.
+                # Retrieved documents live in tool-response messages, so we must surface
+                # them to the gap-finder. Convert tool outputs into plain user messages
+                # and drop the paired assistant tool_calls messages (which would be
+                # orphaned without their tool responses and aren't useful as text).
+                gap_msgs = []
+                for mm in msgs:
+                    if not isinstance(mm, dict):
+                        gap_msgs.append(mm)
+                        continue
+                    role = mm.get("role")
+                    if role == "assistant" and mm.get("tool_calls"):
+                        # Skip assistant turns that only carry tool_calls; their
+                        # textual content (if any) is preserved as a plain assistant msg.
+                        content = mm.get("content")
+                        if content:
+                            gap_msgs.append({"role": "assistant", "content": content})
+                        continue
+                    if role == "tool":
+                        # Reframe the tool output as a user message so the model can read it.
+                        content = mm.get("content", "")
+                        gap_msgs.append({"role": "user", "content": f"[tool result]\n{content}"})
+                        continue
+                    gap_msgs.append(mm)
                 gap_msgs.append({"role": "user", "content": "Based on the retrieved documents above and the original question, identify specific information gaps that are not covered and need to be addressed. Return a concise numbered list of missing pieces of information."})
                 try:
                     gap_r = await llm.chat.completions.create(
@@ -401,12 +429,14 @@ if __name__ == "__main__":
 
         # Register ranker account (idempotent – safe to call every time)
         from utils.ranker import register_ranker_account
-        asyncio.run(register_ranker_account(
+        registration_succeeded = asyncio.run(register_ranker_account(
             region=str(rcfg.get("region", "")).strip(),
             account_name=str(rcfg.get("account_name", "")).strip(),
             register_account_path=str(rcfg.get("register_account_path", "")).strip(),
             access_token=_r_tok,
         ))
+        if not registration_succeeded:
+            print(f"  [ranker] Ranker account registration failed; ranker may not work correctly.")
 
     from prompts import DEFAULT_QUERY_TEMPLATE
     QUERY_TEMPLATE = DEFAULT_QUERY_TEMPLATE.replace("{prune_k}", str(PRUNE_K))
