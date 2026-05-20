@@ -119,6 +119,8 @@ cosmos:
       partition_key_path: "/pk"
       embedding_field: "e"
       documents_root: ""
+      # Fields to always include in context chunks for LLM prompts (e.g., product_id, doc_id, etc.)
+      context_fields: []
       embedding_text_fields:
         - title
         - summary
@@ -164,6 +166,7 @@ cosmos:
       partition_key_path: "/pk"
       embedding_field: "e"
       documents_root: ""
+      context_fields: []
       embedding_text_fields:
         - text
       retrieval:

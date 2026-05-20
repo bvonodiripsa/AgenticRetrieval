@@ -952,9 +952,150 @@ class DecomposedRAGPipeline:
         default_fanout = min(max_sub_q, 3)
         self.subq_fanout_cap = max(1, subq_fanout_cap or default_fanout)
         self.subq_max_concurrency = max(1, subq_max_concurrency)
+
+    def _configured_context_fields(self) -> list[str]:
+        fields = getattr(self.retriever, "configured_context_fields", []) or []
+        return [str(f).strip() for f in fields if str(f).strip()]
+
+    def _inject_inline_context_fields_from_texts(self, answer: str, chunk_texts: list[str]) -> str:
+        configured_fields = self._configured_context_fields()
+        if not configured_fields or not answer.strip():
+            return answer
+
+        configured_lower = {f.lower() for f in configured_fields}
+        title_keys = {"product title", "product title translated", "title", "name"}
+        candidates: list[tuple[str, dict[str, str]]] = []
+
+        for chunk_text in chunk_texts:
+            if not isinstance(chunk_text, str) or not chunk_text.strip():
+                continue
+            title_value = ""
+            field_values: dict[str, str] = {}
+            for raw_line in chunk_text.splitlines():
+                line = raw_line.strip()
+                if not line or ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key_norm = key.strip().lower()
+                value_norm = value.strip()
+                if not value_norm:
+                    continue
+                if key_norm in title_keys and not title_value:
+                    title_value = value_norm
+                    continue
+                if key_norm in configured_lower:
+                    field_values[key_norm] = value_norm
+
+            if title_value and field_values:
+                candidates.append((title_value, field_values))
+
+        if not candidates:
+            return answer
+
+        # Prefer longer titles first to avoid partial replacements.
+        deduped: dict[str, dict[str, str]] = {}
+        for title, values in candidates:
+            deduped.setdefault(title, values)
+
+        updated = answer
+        for title in sorted(deduped.keys(), key=len, reverse=True):
+            values = deduped[title]
+            parts = []
+            for field in configured_fields:
+                value = values.get(field.lower())
+                if value:
+                    parts.append(f"{field}: **{value}**")
+            if not parts:
+                continue
+            inline = " (" + "; ".join(parts) + ")"
+            if title + inline in updated or f"**{title}**{inline}" in updated:
+                continue
+            bold_title = f"**{title}**"
+            if bold_title in updated:
+                updated = updated.replace(bold_title, bold_title + inline, 1)
+            else:
+                updated = updated.replace(title, title + inline, 1)
+
+        def _norm(text: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+        def _tokens(text: str) -> set[str]:
+            return {t for t in _norm(text).split() if t}
+
+        # Fallback pass: rewrite bullet lines using fuzzy title matching.
+        title_field_map: dict[str, str] = {}
+        for title, values in deduped.items():
+            parts = []
+            for field in configured_fields:
+                value = values.get(field.lower())
+                if value:
+                    parts.append(f"{field}: **{value}**")
+            if parts:
+                title_field_map[title] = " (" + "; ".join(parts) + ")"
+
+        if title_field_map:
+            lines = updated.splitlines()
+            used_titles: set[str] = set()
+            for idx, line in enumerate(lines):
+                m = re.match(r"^(\s*-\s+\*\*)([^*]+)(\*\*.*)$", line)
+                if not m:
+                    continue
+                product_name = m.group(2).strip()
+                if not product_name or "product_id:" in line.lower():
+                    continue
+
+                product_tokens = _tokens(product_name)
+                if not product_tokens:
+                    continue
+
+                best_title = ""
+                best_score = 0.0
+                product_norm = _norm(product_name)
+                for title in title_field_map:
+                    if title in used_titles:
+                        continue
+                    title_norm = _norm(title)
+                    if not title_norm:
+                        continue
+                    if title_norm in product_norm or product_norm in title_norm:
+                        score = 1.0
+                    else:
+                        title_tokens = _tokens(title)
+                        if not title_tokens:
+                            continue
+                        overlap = len(product_tokens & title_tokens)
+                        score = overlap / max(1, len(product_tokens))
+                    if score > best_score:
+                        best_score = score
+                        best_title = title
+
+                if best_title and best_score >= 0.5:
+                    inline = title_field_map[best_title]
+                    suffix = m.group(3)
+                    if suffix.startswith("**"):
+                        lines[idx] = f"{m.group(1)}{product_name}**{inline}{suffix[2:]}"
+                    else:
+                        lines[idx] = f"{m.group(1)}{product_name}{inline}{suffix}"
+                    used_titles.add(best_title)
+
+            updated = "\n".join(lines)
+
+        return updated
     
     def _format_context(self, chunks: list[RetrievedChunk]) -> str:
-        return "\n\n".join(f"[{i+1}] {c.text}" for i, c in enumerate(chunks))
+        chunks_text = "\n\n".join(f"[{i+1}] {c.text}" for i, c in enumerate(chunks))
+        configured_fields = getattr(self.retriever, "configured_context_fields", []) or []
+        if not configured_fields:
+            return chunks_text
+        fields_csv = ", ".join(configured_fields)
+        inline_example = "Product Name (" + "; ".join(f"{f}: **value**" for f in configured_fields) + ")"
+        preamble = (
+            "Configured traceability fields: " + fields_csv + "\n"
+            "When mentioning a product by name, include these configured fields inline immediately after the name.\n"
+            "Use format: " + inline_example + "\n"
+            "Do not include non-configured identifier fields (for example upc/document_id/sku) unless explicitly asked."
+        )
+        return preamble + "\n\n" + chunks_text
     
     async def _get_subquestions(self, question: str, answer: str) -> list[str]:
         resp = await self.llm.complete(GAP_DECOMPOSE_PROMPT.format(
@@ -1048,6 +1189,13 @@ class DecomposedRAGPipeline:
         final = await self.llm.complete(SYNTHESIS_PROMPT.format(
             original_question=question, preliminary_answer=current, sub_qa_pairs=sub_pairs or "None"
         ), label="LLM synthesis")
+        chunk_texts = [c.text for c in initial_chunks]
+        for sub in all_subs:
+            for chunk in sub.retrieved_chunks:
+                content = chunk.get("content")
+                if isinstance(content, str):
+                    chunk_texts.append(content)
+        final = self._inject_inline_context_fields_from_texts(final, chunk_texts)
         _ck("pipeline: synthesis – done", t)
         
         _ck("pipeline.run – TOTAL", t_run)
@@ -1173,6 +1321,14 @@ class DecomposedRAGPipeline:
             ),
             label="LLM efficient synthesis",
         )
+        chunk_texts = [c.text for c in initial_chunks]
+        for rd in rounds_data:
+            for sub in rd.get("sub_questions", []):
+                for chunk in sub.get("chunks", []):
+                    content = chunk.get("content")
+                    if isinstance(content, str):
+                        chunk_texts.append(content)
+        final = self._inject_inline_context_fields_from_texts(final, chunk_texts)
         _ck("pipeline: efficient synthesis – done", t)
 
         _ck("pipeline.run_efficient – TOTAL", t_run)

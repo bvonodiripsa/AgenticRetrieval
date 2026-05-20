@@ -57,6 +57,15 @@ def _as_list_of_strings(value: Any) -> list[str]:
     return []
 
 
+def _is_identifier_like_field(field_name: str) -> bool:
+    name = str(field_name or "").strip().lower()
+    if not name:
+        return False
+    if name in {"id", "document_id", "doc_id", "upc", "sku", "ean", "gtin", "uuid"}:
+        return True
+    return name.endswith("_id")
+
+
 def _get_source_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     cosmos_cfg = config.get("cosmos", {})
     configured_sources = cosmos_cfg.get("sources")
@@ -119,7 +128,17 @@ class CombinedRetriever:
         self._expected_vector_dim = int((CONFIG.get("embedding") or CONFIG.get("llm", {})).get("embed_dimensions") or 0)
         self._credential = None
         self._retrieve_cache = LRUCache(int(CONFIG.get("retrieval", {}).get("cache_size", 2000)))
+        # Store per-source context_fields for use in formatting
+        self._source_context_fields = {}
         self._sources = self._normalize_sources(retrieval_sources, fulltext_k_override)
+        # Extract context_fields for each source (by id)
+        cosmos_cfg = CONFIG.get("cosmos", {})
+        config_sources = cosmos_cfg.get("sources", [])
+        for src in config_sources:
+            sid = str(src.get("id") or "").strip()
+            fields = src.get("context_fields", [])
+            if sid and isinstance(fields, list):
+                self._source_context_fields[sid] = [str(f) for f in fields if str(f).strip()]
         self._ranker_http_client: httpx.AsyncClient | None = None
         ranker_cfg = CONFIG.get("ranker", {})
         self._use_ranker = bool(ranker_cfg.get("use_ranker", False))
@@ -155,6 +174,16 @@ class CombinedRetriever:
     @property
     def source_count(self) -> int:
         return len(self._sources)
+
+    @property
+    def configured_context_fields(self) -> list[str]:
+        fields: set[str] = set()
+        for source_fields in self._source_context_fields.values():
+            for field in source_fields:
+                cleaned = str(field).strip()
+                if cleaned:
+                    fields.add(cleaned)
+        return sorted(fields)
 
     @staticmethod
     def _is_safe_field_path(path: str) -> bool:
@@ -347,13 +376,31 @@ class CombinedRetriever:
         emb_field = str(embedding_field or "e").strip()
         embedding = doc.get(emb_field) if isinstance(doc.get(emb_field), list) else doc.get('embedding')
         exclude = {'_rid', '_self', '_etag', '_attachments', '_ts', 'embedding', '_score', emb_field}
+        # Always include user-specified context_fields (if present in doc)
+        context_source = str(source or "")
+        for suffix in ("_fulltext", "_vector"):
+            if context_source.endswith(suffix):
+                context_source = context_source[: -len(suffix)]
+                break
+        context_fields = self._source_context_fields.get(context_source, [])
+        context_parts = []
+        for field in context_fields:
+            if field in doc and doc[field] is not None:
+                context_parts.append(f"{field}: {doc[field]}")
+        # Add the rest of the fields as before (excluding context_fields to avoid duplication)
         parts = []
         for k, v in doc.items():
-            if k not in exclude and v:
-                parts.append(f"{k.replace('_', ' ').title()}: {v if not isinstance(v, (list, dict)) else str(v)}")
+            if k in exclude or not v or k in context_fields:
+                continue
+            # Hide non-configured identifier-like fields to avoid leaking extra IDs
+            # (for example upc/document_id) when user explicitly configured only one ID field.
+            if _is_identifier_like_field(k):
+                continue
+            parts.append(f"{k.replace('_', ' ').title()}: {v if not isinstance(v, (list, dict)) else str(v)}")
+        all_parts = context_parts + parts
         return RetrievedChunk(
             chunk_id=doc.get('id', ''),
-            text="\n".join(parts),
+            text="\n".join(all_parts),
             similarity=(1 - doc.get('_score', 0)) if '_score' in doc else None,
             metadata={'_data_source': source, 'embedding': embedding}
         )
