@@ -15,6 +15,67 @@ _enc = tiktoken.get_encoding("o200k_base")
 def count_tokens(msgs):
     return sum(4 + len(_enc.encode(m["content"] if isinstance(m, dict) and "content" in m and isinstance(m["content"], str) else json.dumps(m) if isinstance(m, dict) else str(m))) for m in msgs) + 2
 
+DEFAULT_INFERENCE_ACCOUNT_API_VERSION = "2026-01-15-preview"
+DEFAULT_MANAGEMENT_SCOPE = "https://management.azure.com/.default"
+
+
+def _ranker_credential(rcfg):
+    tenant_id = str(rcfg.get("tenant_id") or "").strip()
+    return AzureCliCredential(tenant_id=tenant_id) if tenant_id else AzureCliCredential()
+
+
+def _get_cli_token(rcfg, scope: str) -> str:
+    return _ranker_credential(rcfg).get_token(scope).token
+
+
+async def register_inference_account(rcfg, access_token: str) -> bool:
+    """Create/ensure the semantic ranker inference account via ARM.
+
+    This mirrors ../register_account.py and replaces the older
+    region/registerAccount endpoint. The call is idempotent for an existing
+    account and is safe to run at retriever startup.
+    """
+    subscription_id = str(rcfg.get("subscription_id") or "").strip()
+    resource_group = str(rcfg.get("resource_group") or "").strip()
+    region = str(rcfg.get("region") or "").strip()
+    account_name = str(rcfg.get("account_name") or "").strip()
+    if not all([subscription_id, resource_group, region, account_name]):
+        missing = [
+            name for name, value in {
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "region": region,
+                "account_name": account_name,
+            }.items() if not value
+        ]
+        print(f"  [ranker] Skipping inference account registration; missing {', '.join(missing)}")
+        return False
+
+    url = (
+        "https://management.azure.com"
+        f"/subscriptions/{subscription_id}"
+        f"/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.InferenceService/inferenceAccounts/{account_name}"
+        f"?api-version={DEFAULT_INFERENCE_ACCOUNT_API_VERSION}"
+    )
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Environment": "staging",
+    }
+    payload = {"location": region}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.put(url, headers=headers, json=payload)
+    if resp.status_code in (200, 201, 202, 409):
+        print(f"  [ranker] Inference account '{account_name}' registration ensured ({resp.status_code})")
+        return True
+    print(f"  [ranker] Inference account registration failed ({resp.status_code}): {resp.text[:500]}")
+    return False
+
+
+def build_ranker_url(rcfg) -> str:
+    return f"https://{rcfg['account_name']}.{rcfg['region']}.dbinference.azure.com:443/inference/semanticReranking"
+
 # --- Search helpers ---
 async def embed(text):
     r = await embed_client.embeddings.create(input=[text], model=embed_cfg["embed_model"])
@@ -33,9 +94,12 @@ async def vec_search(container, emb, top_k, ef):
     return [item.get("c", item) async for item in container.query_items(query=sql, parameters=[{"name":"@k","value":top_k},{"name":"@emb","value":emb}])]
 
 async def rerank(query, docs, top_k):
-    if not USE_RANKER or not docs: return docs[:top_k]
+    if not USE_RANKER or not docs:
+        print("  [rerank] Reranker disabled or no docs to rerank, returning unranked results")
+        return docs[-top_k:]
     indices = await rerank_documents(_r_http, _r_url, _r_tok, query, docs, top_k, _r_bs, _r_mr)
     if indices is None:
+        print("  [rerank] Reranker failed, returning unranked results")
         return docs[:top_k]
     return [docs[i] for i in indices]
 
@@ -416,25 +480,14 @@ if __name__ == "__main__":
     rcfg = cfg["ranker"]
     USE_RANKER = rcfg["use_ranker"]
     if USE_RANKER:
-        _r_url = f"https://{rcfg['account_name']}.{rcfg['region']}.{rcfg['url_suffix']}"
+        _r_url = build_ranker_url(rcfg)
         _r_bs, _r_mr = rcfg["batch_size"], rcfg["max_retries"]
-        if rcfg["read_token_from_path"]:
-            _r_tok = Path(rcfg["access_token_path"]).read_text().strip()
-        else:
-            _ranker_tenant = str(rcfg.get("tenant_id") or "").strip()
-            _ranker_cred = AzureCliCredential(tenant_id=_ranker_tenant) if _ranker_tenant else AzureCliCredential()
-            _r_tok = _ranker_cred.get_token(rcfg["token_scope"]).token
-        _r_hdr = {"Authorization": f"Bearer {_r_tok}", "Content-Type": "application/json"}
+        token_scope = str(rcfg.get("token_scope") or DEFAULT_MANAGEMENT_SCOPE).strip()
+        _r_tok = _get_cli_token(rcfg, token_scope)
         _r_http = httpx.AsyncClient(timeout=120)
 
-        # Register ranker account (idempotent – safe to call every time)
-        from utils.ranker import register_ranker_account
-        registration_succeeded = asyncio.run(register_ranker_account(
-            region=str(rcfg.get("region", "")).strip(),
-            account_name=str(rcfg.get("account_name", "")).strip(),
-            register_account_path=str(rcfg.get("register_account_path", "")).strip(),
-            access_token=_r_tok,
-        ))
+        # Register the ranker inference account via Azure Resource Manager.
+        registration_succeeded = asyncio.run(register_inference_account(rcfg, _r_tok))
         if not registration_succeeded:
             print(f"  [ranker] Ranker account registration failed; ranker may not work correctly.")
 
