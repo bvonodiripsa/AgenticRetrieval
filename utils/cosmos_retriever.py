@@ -260,23 +260,18 @@ class CombinedRetriever:
             if self._ranker_region and register_account_path:
                 if self._ranker_http_client is None:
                     self._ranker_http_client = httpx.AsyncClient(timeout=120)
-                register_url = f"https://{self._ranker_region}.{register_account_path}"
-                register_payload = {
-                    "AccountName": self._ranker_account,
-                    "Region": self._ranker_region,
-                }
-                register_headers = {
-                    "Authorization": f"Bearer {self._ranker_access_token}",
-                    "Content-Type": "application/json",
-                }
-                try:
-                    resp = await self._ranker_http_client.post(register_url, headers=register_headers, json=register_payload)
-                    if resp.status_code == 200:
-                        _log_line(f"✓ Ranker account '{self._ranker_account}' registered", kind="success")
-                    else:
-                        _log_line(f"Ranker account registration returned {resp.status_code}: {resp.text[:200]}", kind="warn")
-                except Exception as e:
-                    _log_line(f"Ranker account registration failed: {e}", kind="warn")
+                from utils.ranker import register_ranker_account
+                ok = await register_ranker_account(
+                    region=self._ranker_region,
+                    account_name=self._ranker_account,
+                    register_account_path=register_account_path,
+                    access_token=self._ranker_access_token,
+                    http_client=self._ranker_http_client,
+                )
+                if ok:
+                    _log_line(f"✓ Ranker account '{self._ranker_account}' registered", kind="success")
+                else:
+                    _log_line(f"✗ Ranker account '{self._ranker_account}' registration failed", kind="error")
 
     async def _fulltext_search(self, container, fields: list[str], query: str, top_k: int) -> list[dict]:
         if top_k <= 0 or not fields:

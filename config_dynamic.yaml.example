@@ -4,6 +4,7 @@ paths:
   output_root: ""
 
 prune_k: 20
+hyde: false
 
 # Azure OpenAI / LLM settings
 llm:
@@ -35,17 +36,17 @@ embedding:
 ranker:
   use_ranker: true
   rerank_multiplier: 8
-  k_ranker: 10
+  k_ranker: 20
   region: ""
   account_name: ""
   read_token_from_path: false
   access_token_path: ""
   tenant_id: ""
+  subscription_id: ""
+  resource_group: ""
   token_scope: ""
-  register_account_path: ""
-  url_suffix: ""
   batch_size: 16
-  max_retries: 10
+  max_retries: 5
 
 # Cosmos DB settings
 cosmos:
