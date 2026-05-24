@@ -257,3 +257,6 @@ data/annotations/
 config.food.yaml
 data/food.json
 data/food/
+
+utils/create_inference_service.my.py
+utils/test_semantic_reranker.my.py
