@@ -151,7 +151,7 @@ class CombinedRetriever:
             tenant_id = str(ranker_cfg.get("tenant_id", "")).strip()
             token_scope = str(ranker_cfg.get("token_scope", "")).strip()
             if not token_scope:
-                raise ValueError("ranker.token_scope must be a non-empty string when read_token_from_path is false")
+                raise ValueError("ranker.token_scope must be set when ranker.use_ranker is enabled")
             credential = SyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else SyncAzureCliCredential()
             token_obj = credential.get_token(token_scope)
             self._ranker_access_token = token_obj.token
