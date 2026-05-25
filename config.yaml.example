@@ -17,12 +17,8 @@ ranker:
   k_ranker: 40
   region: ""
   account_name: ""
-  read_token_from_path: false
-  access_token_path: "access_token.txt"
-  tenant_id: "" # this is needed when read_token_from_path = false
-  token_scope: "" # this is needed when read_token_from_path = false
-  register_account_path: "" # this is needed when read_token_from_path = false
-  url_suffix: ""
+  tenant_id: ""
+  token_scope: ""
   batch_size: 64
   max_retries: 10
 

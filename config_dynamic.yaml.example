@@ -36,14 +36,9 @@ embedding:
 ranker:
   use_ranker: true
   rerank_multiplier: 8
-  k_ranker: 20
   region: ""
   account_name: ""
-  read_token_from_path: false
-  access_token_path: ""
   tenant_id: ""
-  subscription_id: ""
-  resource_group: ""
   token_scope: ""
   batch_size: 16
   max_retries: 5

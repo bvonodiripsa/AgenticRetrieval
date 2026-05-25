@@ -147,21 +147,14 @@ class CombinedRetriever:
         self._ranker_batch_size = int(ranker_cfg.get("batch_size", 32))
         self._ranker_access_token: str | None = None
         if self._use_ranker:
-            read_token_from_path = bool(ranker_cfg.get("read_token_from_path", True))
-            if read_token_from_path:
-                token_path = str(ranker_cfg.get("access_token_path", "access_token.txt")).strip()
-                if token_path and os.path.isfile(token_path):
-                    with open(token_path, "r") as f:
-                        self._ranker_access_token = f.read().strip()
-            else:
-                from azure.identity import AzureCliCredential as SyncAzureCliCredential
-                tenant_id = str(ranker_cfg.get("tenant_id", "")).strip()
-                token_scope = str(ranker_cfg.get("token_scope", "")).strip()
-                if not token_scope:
-                    raise ValueError("ranker.token_scope must be a non-empty string when read_token_from_path is false")
-                credential = SyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else SyncAzureCliCredential()
-                token_obj = credential.get_token(token_scope)
-                self._ranker_access_token = token_obj.token
+            from azure.identity import AzureCliCredential as SyncAzureCliCredential
+            tenant_id = str(ranker_cfg.get("tenant_id", "")).strip()
+            token_scope = str(ranker_cfg.get("token_scope", "")).strip()
+            if not token_scope:
+                raise ValueError("ranker.token_scope must be a non-empty string when read_token_from_path is false")
+            credential = SyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else SyncAzureCliCredential()
+            token_obj = credential.get_token(token_scope)
+            self._ranker_access_token = token_obj.token
 
     @property
     def total_fulltext_k(self) -> int:
@@ -253,25 +246,6 @@ class CombinedRetriever:
         for source in self._sources:
             self._containers[source["id"]] = self._db.get_container_client(source["container_name"])
         self._llm = LLMClient()
-
-        # Register ranker account (idempotent – safe to call every time)
-        if self._use_ranker and self._ranker_account and self._ranker_access_token:
-            register_account_path = str(CONFIG.get("ranker", {}).get("register_account_path", "")).strip()
-            if self._ranker_region and register_account_path:
-                if self._ranker_http_client is None:
-                    self._ranker_http_client = httpx.AsyncClient(timeout=120)
-                from utils.ranker import register_ranker_account
-                ok = await register_ranker_account(
-                    region=self._ranker_region,
-                    account_name=self._ranker_account,
-                    register_account_path=register_account_path,
-                    access_token=self._ranker_access_token,
-                    http_client=self._ranker_http_client,
-                )
-                if ok:
-                    _log_line(f"✓ Ranker account '{self._ranker_account}' registered", kind="success")
-                else:
-                    _log_line(f"✗ Ranker account '{self._ranker_account}' registration failed", kind="error")
 
     async def _fulltext_search(self, container, fields: list[str], query: str, top_k: int) -> list[dict]:
         if top_k <= 0 or not fields:
@@ -521,7 +495,7 @@ class CombinedRetriever:
             if self._ranker_http_client is None:
                 self._ranker_http_client = httpx.AsyncClient(timeout=120)
             documents = [c.text for c in chunks]
-            url_suffix = str(CONFIG.get("ranker", {}).get("url_suffix", "")).strip()
+            url_suffix = "dbinference.azure.com:443/inference/semanticReranking"
             url = f"https://{self._ranker_account}.{self._ranker_region}.{url_suffix}"
             max_retries = int(CONFIG.get("ranker", {}).get("max_retries", 5))
             ranked_indices = await rerank_documents(
