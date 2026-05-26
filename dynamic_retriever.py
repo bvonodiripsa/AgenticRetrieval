@@ -1584,8 +1584,18 @@ async def tool_use_do_search(query: str, containers: dict) -> str:
 
 async def _tool_use_fulltext_search(container, fields, query, top_k):
     """Wrapper around utils.fulltext.fulltext_search that emits _ck checkpoints."""
-    t = _ck(f"fulltext (top {top_k}, {container.id}, {len(fields)} fields) – start")
-    items = await fulltext_search(container, fields, query, top_k)
+    if not fields:
+        normalized_fields = []
+    elif isinstance(fields, list):
+        normalized_fields = fields
+    else:
+        normalized_fields = list(fields)
+
+    if top_k <= 0 or not normalized_fields:
+        return []
+
+    t = _ck(f"fulltext (top {top_k}, {container.id}, {len(normalized_fields)} fields) – start")
+    items = await fulltext_search(container, normalized_fields, query, top_k)
     _ck(f"fulltext – done ({len(items)} results, {container.id})", t)
     return items
 
