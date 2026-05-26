@@ -1495,7 +1495,11 @@ async def tool_use_vec_search(container, emb, top_k, ef):
 
 
 async def tool_use_rerank(query: str, docs: list[str], top_k: int) -> list[str]:
-    if not _tool_use_use_ranker or not docs:
+    top_k = max(0, min(top_k, len(docs)))
+    if top_k <= 0:
+        print("  [rerank] No docs requested for reranking, returning empty results")
+        return []
+    if not _tool_use_use_ranker:
         print("  [rerank] Reranker disabled or no docs to rerank, returning unranked results")
         return docs[-top_k:]
     t = _ck(f"semantic ranker (top {top_k}, {len(docs)} docs) – start")
