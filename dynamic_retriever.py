@@ -1569,7 +1569,12 @@ async def tool_use_do_search(query: str, containers: dict) -> str:
                 all_d.append(d)
     total_k = sum(r["search_k"] + r["fulltext_search_k"] for r in _tool_use_source_cfg.values())
     texts = [tool_use_fmt(d) for d in all_d]
-    ranked_texts = await tool_use_rerank(query, texts, total_k)
+    if not texts:
+        out = json.dumps([])
+        _ck("retrieve – TOTAL (0 chunks returned)", t_retrieve)
+        return out
+    rerank_k = min(total_k, len(texts))
+    ranked_texts = await tool_use_rerank(query, texts, rerank_k)
     text_to_idx = {id(t): i for i, t in enumerate(texts)}
     ranked_indices = [text_to_idx[id(t)] for t in ranked_texts]
     out = json.dumps([{"docid": all_d[i].get("id", ""), "text": ranked_texts[j]} for j, i in enumerate(ranked_indices)])
