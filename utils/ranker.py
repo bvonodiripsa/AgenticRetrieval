@@ -1,6 +1,6 @@
 """Shared semantic ranker helper.
 
-This module has no heavy dependencies (no CONFIG, no agentic_retriever) so it
+This module has no heavy dependencies (no CONFIG, no dynamic_retriever) so it
 can be imported safely from both cosmos_retriever.py and dynamic_retriever.py.
 """
 
@@ -27,6 +27,17 @@ async def rerank_documents(
     if not documents or top_k <= 0:
         return list(range(min(len(documents), top_k)))
 
+    # The semantic ranker silently returns Scores=[] when any document in the
+    # request is an empty string. Diagnose and abort cleanly so callers get a
+    # useful signal instead of 5 retries.
+    empty_idxs = [i for i, d in enumerate(documents) if not (isinstance(d, str) and d.strip())]
+    if empty_idxs:
+        print(
+            f"  [rerank_documents] aborting: {len(empty_idxs)}/{len(documents)} documents are empty "
+            f"(first empty idx={empty_idxs[0]}). The ranker rejects payloads containing empty strings."
+        )
+        return None
+
     body = {
         "query": query,
         "documents": documents,
@@ -37,56 +48,48 @@ async def rerank_documents(
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
+        # Required to target the staging slot of the semantic-ranker preview.
+        # Without it the server silently returns Scores=[] with token_usage=0.
+        "X-Environment": "Staging",
     }
+
+    transient_empty = 0
+    last_response_preview: str | None = None
+    last_exception: Exception | None = None
 
     for attempt in range(max_retries):
         try:
             resp = await http_client.post(url, headers=headers, json=body)
             if resp.status_code in (429, 502, 503) and attempt + 1 < max_retries:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 ** attempt, 8))
                 continue
             resp.raise_for_status()
-            scores = resp.json().get("Scores", [])
+            response_json = resp.json()
+            scores = response_json.get("Scores", [])
+            if len(scores) != top_k:
+                transient_empty += 1
+                last_response_preview = str(response_json)[:500]
+                if attempt + 1 < max_retries:
+                    # Service is flaky – short backoff and try again silently.
+                    await asyncio.sleep(0.5)
+                    continue
+
             return [s["index"] for s in scores[:top_k] if s["index"] < len(documents)]
         except Exception as e:
-            print(f"  [rerank_documents] attempt {attempt+1} failed: {e}")
+            last_exception = e
             if attempt + 1 < max_retries:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 ** attempt, 8))
                 continue
-            return None
+            break
 
+    # All retries exhausted – emit one consolidated diagnostic.
+    if last_exception is not None:
+        print(f"  [rerank_documents] gave up after {max_retries} attempts: {last_exception}")
+    else:
+        print(
+            f"  [rerank_documents] gave up after {max_retries} transient empty-Scores responses "
+            f"(top_k={top_k}, n_docs={len(documents)}, batch_size={batch_size})"
+        )
+        if last_response_preview:
+            print(f"  [rerank_documents]   last response: {last_response_preview}")
     return None
-
-
-async def register_ranker_account(
-    region: str,
-    account_name: str,
-    register_account_path: str,
-    access_token: str,
-    http_client: httpx.AsyncClient | None = None,
-) -> bool:
-    """Register ranker account (idempotent). Returns True on success."""
-    if not region or not account_name or not register_account_path:
-        return False
-    if not access_token or not access_token.strip():
-        print("  [ranker] Access token is empty, cannot register ranker account")
-        return False
-    url = f"https://{region}.{register_account_path}"
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-    payload = {"AccountName": account_name, "Region": region}
-    own_client = http_client is None
-    if own_client:
-        http_client = httpx.AsyncClient(timeout=30)
-    try:
-        resp = await http_client.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            print(f"  [ranker] Account '{account_name}' registered successfully")
-            return True
-        else:
-            print(f"  [ranker] Account registration returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        print(f"  [ranker] Account registration failed: {e}")
-    finally:
-        if own_client:
-            await http_client.aclose()
-    return False

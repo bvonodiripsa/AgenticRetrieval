@@ -15,13 +15,13 @@ def test_cosmos_retriever_importable():
 
 
 def test_rag_divdet_exposes_combined_retriever():
-    """CombinedRetriever should be accessible via agentic_retriever after extraction."""
-    import agentic_retriever
+    """CombinedRetriever should be accessible via dynamic_retriever after extraction."""
+    import dynamic_retriever
     from utils.cosmos_retriever import CombinedRetriever
     # main_async imports CombinedRetriever at call time; verify the class exists
     assert CombinedRetriever is not None
-    # DecomposedRAGPipeline should still be in agentic_retriever
-    assert hasattr(agentic_retriever, "DecomposedRAGPipeline")
+    # DecomposedRAGPipeline should still be in dynamic_retriever
+    assert hasattr(dynamic_retriever, "DecomposedRAGPipeline")
 
 
 # ---------------------------------------------------------------------------
@@ -73,20 +73,20 @@ def test_as_list_of_strings():
 
 
 # ---------------------------------------------------------------------------
-# Timing globals: _TIMING mutations in agentic_retriever are visible
+# Timing globals: _TIMING mutations in dynamic_retriever are visible
 # ---------------------------------------------------------------------------
 
 def test_timing_flag_visible_via_module():
-    """Runtime mutations to agentic_retriever._TIMING must be visible in utils.cosmos_retriever."""
-    import agentic_retriever
+    """Runtime mutations to dynamic_retriever._TIMING must be visible in utils.cosmos_retriever."""
+    import dynamic_retriever
     from utils import cosmos_retriever
 
-    original = agentic_retriever._TIMING
+    original = dynamic_retriever._TIMING
     try:
-        agentic_retriever._TIMING = True
+        dynamic_retriever._TIMING = True
         # cosmos_retriever accesses _rag._TIMING at runtime
         # Verify the module reference is the same object
-        import agentic_retriever as _rag_ref
+        import dynamic_retriever as _rag_ref
         assert _rag_ref._TIMING is True
     finally:
-        agentic_retriever._TIMING = original
+        dynamic_retriever._TIMING = original

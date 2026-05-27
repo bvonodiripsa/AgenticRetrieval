@@ -1,4 +1,4 @@
-"""Cosmos DB retriever – extracted from agentic_retriever.py for readability."""
+"""Cosmos DB retriever – extracted from dynamic_retriever.py for readability."""
 
 import asyncio
 import copy
@@ -15,8 +15,8 @@ import numpy as np
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, DefaultAzureCredential
 
-import agentic_retriever as _rag
-from agentic_retriever import (
+import dynamic_retriever as _rag
+from dynamic_retriever import (
     _log_line,
     _format_activity_id_note,
     _multi_activity_reason,
@@ -85,14 +85,24 @@ def _get_source_config(config: dict[str, Any]) -> list[dict[str, Any]]:
         source = source or {}
         retrieval_cfg = source.get("retrieval") or {}
         source_id = str(source.get("id") or f"source_{idx}").strip()
+        # Accept canonical names (search_k / fulltext_search_k) and legacy
+        # aliases (vector_k / fulltext_k). dynamic_retriever.load_config()
+        # rewrites legacy keys with a DeprecationWarning before this code runs,
+        # so the legacy fallbacks here are belt-and-suspenders.
+        vector_k = int(
+            retrieval_cfg.get("search_k", retrieval_cfg.get("vector_k", 0)) or 0
+        )
+        fulltext_k = int(
+            retrieval_cfg.get("fulltext_search_k", retrieval_cfg.get("fulltext_k", 0)) or 0
+        )
         normalized_sources.append(
             {
                 "id": source_id,
                 "container_name": source.get("container_name"),
                 "partition_key_path": source.get("partition_key_path"),
                 "embedding_field": str(source.get("embedding_field") or "e").strip(),
-                "vector_k": int(retrieval_cfg.get("vector_k", 0) or 0),
-                "fulltext_k": int(retrieval_cfg.get("fulltext_k", 0) or 0),
+                "vector_k": vector_k,
+                "fulltext_k": fulltext_k,
                 "fulltext_fields": _as_list_of_strings(retrieval_cfg.get("fulltext_fields")),
             }
         )
@@ -148,21 +158,14 @@ class CombinedRetriever:
         self._ranker_batch_size = int(ranker_cfg.get("batch_size", 32))
         self._ranker_access_token: str | None = None
         if self._use_ranker:
-            read_token_from_path = bool(ranker_cfg.get("read_token_from_path", True))
-            if read_token_from_path:
-                token_path = str(ranker_cfg.get("access_token_path", "access_token.txt")).strip()
-                if token_path and os.path.isfile(token_path):
-                    with open(token_path, "r") as f:
-                        self._ranker_access_token = f.read().strip()
-            else:
-                from azure.identity import AzureCliCredential as SyncAzureCliCredential
-                tenant_id = str(ranker_cfg.get("tenant_id", "")).strip()
-                token_scope = str(ranker_cfg.get("token_scope", "")).strip()
-                if not token_scope:
-                    raise ValueError("ranker.token_scope must be a non-empty string when read_token_from_path is false")
-                credential = SyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else SyncAzureCliCredential()
-                token_obj = credential.get_token(token_scope)
-                self._ranker_access_token = token_obj.token
+            from azure.identity import AzureCliCredential as SyncAzureCliCredential
+            tenant_id = str(ranker_cfg.get("tenant_id", "")).strip()
+            token_scope = str(ranker_cfg.get("token_scope", "")).strip()
+            if not token_scope:
+                raise ValueError("ranker.token_scope must be set when ranker.use_ranker is enabled")
+            credential = SyncAzureCliCredential(tenant_id=tenant_id) if tenant_id else SyncAzureCliCredential()
+            token_obj = credential.get_token(token_scope)
+            self._ranker_access_token = token_obj.token
 
     @property
     def total_fulltext_k(self) -> int:
@@ -254,25 +257,6 @@ class CombinedRetriever:
         for source in self._sources:
             self._containers[source["id"]] = self._db.get_container_client(source["container_name"])
         self._llm = LLMClient()
-
-        # Register ranker account (idempotent – safe to call every time)
-        if self._use_ranker and self._ranker_account and self._ranker_access_token:
-            register_account_path = str(CONFIG.get("ranker", {}).get("register_account_path", "")).strip()
-            if self._ranker_region and register_account_path:
-                if self._ranker_http_client is None:
-                    self._ranker_http_client = httpx.AsyncClient(timeout=120)
-                from utils.ranker import register_ranker_account
-                ok = await register_ranker_account(
-                    region=self._ranker_region,
-                    account_name=self._ranker_account,
-                    register_account_path=register_account_path,
-                    access_token=self._ranker_access_token,
-                    http_client=self._ranker_http_client,
-                )
-                if ok:
-                    _log_line(f"✓ Ranker account '{self._ranker_account}' registered", kind="success")
-                else:
-                    _log_line(f"✗ Ranker account '{self._ranker_account}' registration failed", kind="error")
 
     async def _fulltext_search(self, container, fields: list[str], query: str, top_k: int) -> list[dict]:
         if top_k <= 0 or not fields:
@@ -548,7 +532,7 @@ class CombinedRetriever:
             if self._ranker_http_client is None:
                 self._ranker_http_client = httpx.AsyncClient(timeout=120)
             documents = [c.text for c in chunks]
-            url_suffix = str(CONFIG.get("ranker", {}).get("url_suffix", "")).strip()
+            url_suffix = "dbinference.azure.com:443/inference/semanticReranking"
             url = f"https://{self._ranker_account}.{self._ranker_region}.{url_suffix}"
             max_retries = int(CONFIG.get("ranker", {}).get("max_retries", 5))
             ranked_indices = await rerank_documents(

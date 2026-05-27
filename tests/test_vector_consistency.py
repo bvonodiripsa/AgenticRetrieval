@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 # ── load config BEFORE anything that reads CONFIG ──────────────────────────
-from agentic_retriever import load_config
+from dynamic_retriever import load_config
 
 parser = argparse.ArgumentParser(description="Vector-search consistency checker")
 parser.add_argument("--config", type=Path, required=True, help="Path to config YAML")
@@ -43,7 +43,7 @@ args = parser.parse_args()
 load_config(args.config)
 
 # Now safe to import modules that read CONFIG at import time
-from agentic_retriever import CONFIG  # noqa: E402
+from dynamic_retriever import CONFIG  # noqa: E402
 from utils.cosmos_retriever import CombinedRetriever, _get_source_config  # noqa: E402
 
 

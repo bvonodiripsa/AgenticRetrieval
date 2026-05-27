@@ -39,7 +39,11 @@ def find_timing_logs() -> list[Path]:
 
 def is_completed_timing_log(text: str) -> bool:
     clean_text = strip_ansi(text)
-    return ("pipeline.run – TOTAL" in clean_text) or ("pipeline.run_efficient – TOTAL" in clean_text)
+    return (
+        ("pipeline.run – TOTAL" in clean_text)
+        or ("pipeline.run_efficient – TOTAL" in clean_text)
+        or ("tool-use main – TOTAL" in clean_text)
+    )
 
 
 def parse_timings(text: str):
@@ -55,6 +59,13 @@ def parse_timings(text: str):
         "llm_prelim": [],
         "llm_regen1": [],
         "llm_gap": [],
+        # Tool-use specific buckets
+        "llm_agent_step": [],
+        "llm_hyde": [],
+        "llm_find_gaps": [],
+        "semantic_ranker": [],
+        "prune_done": [],
+        "embed_done": [],
         "pipeline_total": [],
         "run_totals": [],
     }
@@ -68,11 +79,15 @@ def parse_timings(text: str):
             valid_label_prefixes = (
                 "pipeline.",
                 "pipeline:",
+                "tool-use.",
+                "tool-use ",
                 "retrieve",
                 "fulltext",
                 "vector",
                 "LLM ",
                 "embed",
+                "prune",
+                "semantic ranker",
             )
             if rest.startswith(valid_label_prefixes):
                 return rest.strip()
@@ -113,9 +128,23 @@ def parse_timings(text: str):
             data["llm_regen1"].append(value)
         elif label.startswith("LLM gap-decompose – done"):
             data["llm_gap"].append(value)
+        elif label.startswith("LLM find_gaps – done"):
+            data["llm_find_gaps"].append(value)
+        elif label.startswith("LLM agent step – done"):
+            data["llm_agent_step"].append(value)
+        elif label.startswith("LLM HyDE – done"):
+            data["llm_hyde"].append(value)
+        elif label.startswith("semantic ranker – done"):
+            data["semantic_ranker"].append(value)
+        elif label.startswith("prune – done"):
+            data["prune_done"].append(value)
+        elif label.startswith("embed query – done"):
+            data["embed_done"].append(value)
         elif label.startswith("pipeline.run – TOTAL"):
             data["pipeline_total"].append(value)
         elif label.startswith("pipeline.run_efficient – TOTAL"):
+            data["pipeline_total"].append(value)
+        elif label.startswith("tool-use.run – TOTAL"):
             data["pipeline_total"].append(value)
 
     err_lines = [line for line in clean_text.splitlines() if line.startswith("Error:")]
@@ -211,6 +240,12 @@ def pct_change_range(prev_rng, curr_rng):
     return f"{((curr_value - prev_value) / prev_value) * 100:+.1f}%"
 
 
+def total_per_question(values, questions):
+    if not values or not questions or questions <= 0:
+        return None
+    return sum(values) / questions
+
+
 def build_metric_values(data):
     values = {}
     values["retrieve() TOTAL – single call"] = fmt_single(first_wave_mean(data["retrieve_total"], 5))
@@ -231,6 +266,37 @@ def build_metric_values(data):
     values["LLM gap-decompose"] = fmt_range(full_range(data["llm_gap"]))
     questions = data.get("_meta", {}).get("questions")
     question_note = f" [{questions} questions]" if isinstance(questions, int) and questions > 0 else ""
+
+    # ── Tool-use-specific rows (emitted only when tool-use data was captured) ──
+    has_tool_use_data = bool(
+        data.get("llm_agent_step")
+        or data.get("llm_hyde")
+        or data.get("llm_find_gaps")
+        or data.get("semantic_ranker")
+        or data.get("prune_done")
+    )
+    if has_tool_use_data:
+        agent_step_values = data.get("llm_agent_step", [])
+        values["LLM agent step – mean per call"] = fmt_single(mean(agent_step_values))
+        values["LLM agent step – total per question"] = fmt_single(
+            total_per_question(agent_step_values, questions)
+        )
+        values["LLM agent step – calls / question"] = (
+            "NA" if not (agent_step_values and questions) else f"{len(agent_step_values) / questions:.1f}"
+        )
+        values["LLM HyDE – mean"] = fmt_single(mean(data.get("llm_hyde", [])))
+        values["LLM find_gaps – mean"] = fmt_single(mean(data.get("llm_find_gaps", [])))
+        values["Semantic ranker – mean"] = fmt_single(mean(data.get("semantic_ranker", [])))
+        values["Prune – mean"] = fmt_single(mean(data.get("prune_done", [])))
+        values["Embed query – mean"] = fmt_single(mean(data.get("embed_done", [])))
+        values["retrieve() – total per question"] = fmt_single(
+            total_per_question(data.get("retrieve_total", []), questions)
+        )
+        values["retrieve() – calls / question"] = (
+            "NA" if not (data.get("retrieve_total") and questions)
+            else f"{len(data['retrieve_total']) / questions:.1f}"
+        )
+
     values[f"premium prompt tokens TOTAL{question_note}"] = fmt_tokens(
         data.get("_meta", {}).get("total_prompt_tokens")
     )
@@ -368,7 +434,8 @@ def main():
     timing_logs = find_timing_logs()
     if not timing_logs:
         raise RuntimeError(
-            "No timing logs found in out/. Run agentic_retriever.py with --timing and capture output to a .log file in out/."
+            "No timing logs found in out/. Run dynamic_retriever.py with --timing "
+            "(in either --mode decomposed or --mode tool-use) and capture output to a .log file in out/."
         )
 
     completed_logs: list[tuple[Path, str]] = []
