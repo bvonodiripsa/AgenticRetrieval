@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import logging
 import os
 import re
 import sys
@@ -432,12 +433,38 @@ class CombinedRetriever:
             if container is None:
                 continue
             top_k = int(source.get("fulltext_k", 0) or 0) // k_divisor
-            fields = source.get("fulltext_fields") or []
-            if top_k <= 0 or not fields:
+            if top_k <= 0:
                 continue
-            t_fulltext = _ck(f"  retrieve: fulltext/{source['id']} – start (parallel)")
-            task = asyncio.create_task(self._fulltext_search(container, fields, query, top_k))
-            fulltext_tasks.append(({"source": source, "timer": t_fulltext}, task))
+
+            # Try configured full-text search fields
+            fulltext_search_fields = []
+
+            # First attempt: discover actual full-text indexed fields from container indexing policy.
+            # Fallback to config-based values if this fails or yields nothing.
+            self._ctrproxy = container
+            indexed_fields = await self._indexed_fulltext_fields()
+            if indexed_fields:
+                # Keep existing loop contract where each item is a field-combination list.
+                fulltext_search_fields = [indexed_fields]
+                logging.info(
+                    f"_fallback_text_search: Loaded {len(indexed_fields)} indexed full-text fields from container policy"
+                )
+
+            # Fallback: load from config (e.g., .env or config service)
+            if not fulltext_search_fields:
+                configured = source.get("fulltext_fields") or []
+                if configured:
+                    fulltext_search_fields = [configured]
+
+            if not fulltext_search_fields:
+                continue
+
+            for fields in fulltext_search_fields:
+                if not fields:
+                    continue
+                t_fulltext = _ck(f"  retrieve: fulltext/{source['id']} – start (parallel)")
+                task = asyncio.create_task(self._fulltext_search(container, fields, query, top_k))
+                fulltext_tasks.append(({"source": source, "timer": t_fulltext}, task))
 
         emb: list[float] | None = None
         vector_sources = [source for source in self._sources if int(source.get("vector_k", 0) or 0) > 0]
@@ -553,3 +580,30 @@ class CombinedRetriever:
         if self._ranker_http_client is not None:
             await self._ranker_http_client.aclose()
             self._ranker_http_client = None
+
+    async def _indexed_fulltext_fields(self):
+        """
+        Return full-text indexed field names from the container indexing policy.
+        """
+        indexed_fields = []
+        try:
+            props = await self._ctrproxy.read()
+            indexing_policy = props.get("indexingPolicy", {})
+            full_text_indexes = indexing_policy.get("fullTextIndexes", [])
+
+            for index in full_text_indexes:
+                path = index.get("path", "")
+                if not path:
+                    continue
+
+                # Normalize Cosmos path (e.g. '/description/?') to SQL field path (e.g. 'description').
+                normalized = path.strip("/").replace("/?", "").replace("/*", "")
+                normalized = normalized.replace("/", ".")
+                if normalized and normalized not in indexed_fields:
+                    indexed_fields.append(normalized)
+        except Exception as index_error:
+            logging.warning(
+                f"fulltext_search: Could not read fullTextIndexes from container policy: {str(index_error)[:200]}"
+            )
+
+        return indexed_fields
