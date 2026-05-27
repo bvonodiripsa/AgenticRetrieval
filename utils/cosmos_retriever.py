@@ -1,4 +1,4 @@
-"""Cosmos DB retriever – extracted from agentic_retriever.py for readability."""
+"""Cosmos DB retriever – extracted from dynamic_retriever.py for readability."""
 
 import asyncio
 import copy
@@ -14,8 +14,8 @@ import numpy as np
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential, DefaultAzureCredential
 
-import agentic_retriever as _rag
-from agentic_retriever import (
+import dynamic_retriever as _rag
+from dynamic_retriever import (
     _log_line,
     _format_activity_id_note,
     _multi_activity_reason,
@@ -84,14 +84,24 @@ def _get_source_config(config: dict[str, Any]) -> list[dict[str, Any]]:
         source = source or {}
         retrieval_cfg = source.get("retrieval") or {}
         source_id = str(source.get("id") or f"source_{idx}").strip()
+        # Accept canonical names (search_k / fulltext_search_k) and legacy
+        # aliases (vector_k / fulltext_k). dynamic_retriever.load_config()
+        # rewrites legacy keys with a DeprecationWarning before this code runs,
+        # so the legacy fallbacks here are belt-and-suspenders.
+        vector_k = int(
+            retrieval_cfg.get("search_k", retrieval_cfg.get("vector_k", 0)) or 0
+        )
+        fulltext_k = int(
+            retrieval_cfg.get("fulltext_search_k", retrieval_cfg.get("fulltext_k", 0)) or 0
+        )
         normalized_sources.append(
             {
                 "id": source_id,
                 "container_name": source.get("container_name"),
                 "partition_key_path": source.get("partition_key_path"),
                 "embedding_field": str(source.get("embedding_field") or "e").strip(),
-                "vector_k": int(retrieval_cfg.get("vector_k", 0) or 0),
-                "fulltext_k": int(retrieval_cfg.get("fulltext_k", 0) or 0),
+                "vector_k": vector_k,
+                "fulltext_k": fulltext_k,
                 "fulltext_fields": _as_list_of_strings(retrieval_cfg.get("fulltext_fields")),
             }
         )

@@ -7,9 +7,14 @@ DiverseRAG is a two-stage Azure Cosmos DB + Azure OpenAI pipeline:
    - Builds embeddings and stores them in field `e`.
    - Upserts documents into Cosmos DB containers with vector + full-text indexing support.
 
-2. **Retrieval + Answering (`agentic_retriever.py`)**
-   - Runs decomposed RAG using full-text retrieval, vector retrieval, and diversity selection.
-   - Generates answers for question files and writes grouped outputs under `out/`.
+2. **Retrieval + Answering (`dynamic_retriever.py`)**
+   - Single entry point exposing two paradigms via `--mode`:
+     - `--mode tool-use` (default) — agentic LLM-driven tool-calling loop
+       (`initial_search` / `search` / `prune` / `find_information_gaps` / `final_answer`).
+     - `--mode decomposed` — multi-round decomposed RAG using fulltext +
+       vector + diversity selection + semantic reranking.
+   - Generates answers for question files and writes outputs under the configured
+     `paths.output_root`.
 
 ## What this project does
 
@@ -121,15 +126,17 @@ How to use it:
 Then run:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path path/to/questions.json
+python dynamic_retriever.py --config config.yaml --questions-path path/to/questions.json
 ```
 
 Both `--config` and `--questions-path` are required. `--config` specifies the YAML configuration file; `--questions-path` points to a single `.json` file containing the question array.
 
+The paradigm is selected by `--mode {tool-use,decomposed}` (CLI flag) or `pipeline.mode` in YAML; the CLI overrides the config. The default when neither is set is `tool-use`.
+
 Typical limited smoke test:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
+python dynamic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
 ```
 
 ### 4) Generate timing summary table
@@ -142,7 +149,7 @@ python timing_summary.py
 
 What this script does:
 
-- Runs a fresh timed benchmark (`agentic_retriever.py --config config.yaml --questions-path <questions_file> --max-questions 5 --timing`).
+- Runs a fresh timed benchmark (`dynamic_retriever.py --mode decomposed --config config.yaml --questions-path <questions_file> --max-questions 5 --timing`).
 - Parses key retrieval/LLM timing checkpoints from the terminal output.
 - Writes a timestamped log in `out/` (`timing_5q_rerun_<timestamp>.log`).
 - Updates `out/timing_5q_latest.log` with the newest run.
@@ -172,7 +179,7 @@ Outputs are written to:
 Add `--timing` to print a checkpoint line for every major operation as it completes:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
+python dynamic_retriever.py --mode decomposed --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
 ```
 
 Each line has the form:
@@ -186,7 +193,7 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 ## Repository layout
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert
-- `agentic_retriever.py` — decomposed RAG retrieval/answer pipeline
+- `dynamic_retriever.py` — unified retriever (tool-use + decomposed paradigms via `--mode`)
 - `timing_summary.py` — timed rerun + timing comparison table generation
 - `config.yaml.example` — full config template
 - `data/` — sample input corpus

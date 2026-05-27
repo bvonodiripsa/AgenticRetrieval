@@ -1,6 +1,6 @@
 """Shared fulltext search helpers and stopwords.
 
-This module has no heavy dependencies (no CONFIG, no agentic_retriever) so it
+This module has no heavy dependencies (no CONFIG, no dynamic_retriever) so it
 can be imported safely from both cosmos_retriever.py and dynamic_retriever.py.
 """
 

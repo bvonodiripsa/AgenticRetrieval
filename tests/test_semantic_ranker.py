@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from agentic_retriever import RetrievedChunk
+from dynamic_retriever import RetrievedChunk
 from utils.cosmos_retriever import CombinedRetriever, RETRIEVAL_SOURCES, CONFIG
 
 
