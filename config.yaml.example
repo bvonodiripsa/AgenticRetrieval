@@ -48,7 +48,7 @@ execution:
 
 # Azure OpenAI / LLM settings ([shared]).
 llm:
- llm_endpoint: "https://<foundry-resource-name>.cognitiveservices.azure.com/"
+  llm_endpoint: "https://<foundry-resource-name>.cognitiveservices.azure.com/"
   api_version: "2024-12-01-preview"
   llm_model: "<deployment-name>"
   temperature: 0.0
@@ -84,7 +84,7 @@ local_llm:
 
 # Embedding settings ([shared])
 embedding:
-  embed_endpoint: "https://<foundry-resource-name.openai.azure.com/"
+  embed_endpoint: "https://<foundry-resource-name>.openai.azure.com/"
   api_version: "2024-12-01-preview"
   embed_model: "<deployment-name>"
   embed_dimensions: 1024
