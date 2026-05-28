@@ -16,6 +16,6 @@ They focus on the sample-data path configured by the root `config.yaml.example` 
 2. Copy `config.yaml.example` to `config.yaml`.
 3. Fill in Azure OpenAI, embedding, Cosmos DB, and `cosmos.sources` settings.
 4. Run `cosmos_db_upload.py` to ingest documents.
-5. Run `agentic_retriever.py` with a questions file to generate answers.
+5. Run `dynamic_retriever.py` with a questions file to generate answers.
 
 See [How to use](How-to-use.md) for the complete flow.

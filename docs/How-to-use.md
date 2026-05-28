@@ -181,13 +181,13 @@ Use smaller values if your embedding endpoint is rate limited. Use larger values
 Run from the repository root:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json
+python dynamic_retriever.py --config config.yaml --questions-path data/questions-answers.json
 ```
 
 For a quick smoke test:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
+python dynamic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1
 ```
 
 The questions file should be a JSON array with `question_id` and `question_text`. If you want evaluation output, include `answer` as the ground-truth answer.
@@ -233,7 +233,7 @@ Pipeline settings:
 You can override many YAML settings from the command line:
 
 ```bash
-python agentic_retriever.py \
+python dynamic_retriever.py \
   --config config.yaml \
   --questions-path data/questions-answers.json \
   --max-questions 1 \
@@ -285,7 +285,7 @@ This script reruns a short timed benchmark and writes comparison files under the
 For one-off profiling, add `--timing` directly to retrieval:
 
 ```bash
-python agentic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
+python dynamic_retriever.py --config config.yaml --questions-path data/questions-answers.json --max-questions 1 --timing
 ```
 
 ## Troubleshooting

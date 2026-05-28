@@ -9,7 +9,7 @@ Agentic Retrieval has two main stages:
 1. **Ingestion** reads source documents, builds embedding vectors, and writes documents plus vectors to Azure Cosmos DB.
 2. **Retrieval and answering** reads a question, retrieves relevant documents with vector and optional full-text search, optionally reduces or reranks those results, and asks an LLM to produce an answer.
 
-The main scripts are `cosmos_db_upload.py` for ingestion and `agentic_retriever.py` for retrieval and answering.
+The main scripts are `cosmos_db_upload.py` for ingestion and `dynamic_retriever.py` for retrieval and answering.
 
 ## Documents, Chunks, and Context
 
@@ -77,7 +77,7 @@ Vector and full-text indexes must match the paths configured in the vector embed
 
 ## Vector Search
 
-[Vector search in Azure Cosmos DB for NoSQL](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/vector-search) finds documents whose embedding vectors are close to the query embedding. In this repo, `agentic_retriever.py` embeds the question, then `utils/cosmos_retriever.py` queries Cosmos DB with `VectorDistance` against each source's `embedding_field`.
+[Vector search in Azure Cosmos DB for NoSQL](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/vector-search) finds documents whose embedding vectors are close to the query embedding. In this repo, `dynamic_retriever.py` embeds the question, then `utils/cosmos_retriever.py` queries Cosmos DB with `VectorDistance` against each source's `embedding_field`.
 
 `retrieval.vector_k` controls how many vector results are requested from a source before cross-source merging, diversity selection, and optional reranking.
 
@@ -146,7 +146,7 @@ The config fields `pipeline.preliminary_prefix` and `pipeline.subquery_prefix` l
 
 ## Runtime Overrides
 
-Many config values can be set directly on `agentic_retriever.py` for a single run:
+Many config values can be set directly on `dynamic_retriever.py` for a single run:
 
 - `--k-diverse` # Number of retrieved chunks kept after diversity selection. Use `0` to skip diversity selection. Config: `retrieval.k_diverse`.
 - `--k-ranker` # Number of chunks kept after semantic reranking. Use `0` to skip ranker reduction. Config: `ranker.k_ranker`.

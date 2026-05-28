@@ -204,7 +204,7 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 ## Repository layout
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert
-- `agentic_retriever.py` — decomposed RAG retrieval/answer pipeline
+- `dynamic_retriever.py` — decomposed RAG retrieval/answer pipeline
 - `timing_summary.py` — timed rerun + timing comparison table generation
 - `config.yaml.example` — sample data config template for files under `data/`
 - `data/` — sample input corpus
