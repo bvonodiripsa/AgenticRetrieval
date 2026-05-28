@@ -1,20 +1,31 @@
-# DiverseRAG
+# Agentic Retrieval
 
-DiverseRAG is a two-stage Azure Cosmos DB + Azure OpenAI pipeline:
+![Agentic Retrieval overview](AgenticRetrievalOverview.png)
+
+Agentic Retrieval is a multi-stage agentic retrieval accelerator for answering complex questions that typically require multi-hop reasoning. It is a self-correcting RAG system that iteratively identifies knowledge gaps, retrieves targeted evidence, and generates more complete answers — built on Azure Cosmos DB for NoSQL and Microsoft Foundry.
+
+Instead of relying on a single search-and-answer pass, the pipeline interleaves retrieval and reasoning across multiple rounds: it drafts a preliminary answer, analyzes what is still missing or under-supported, decomposes the gap into focused sub-questions, retrieves new evidence per sub-question across one or more Cosmos DB containers, and finally synthesizes a grounded answer from the accumulated context.
+
+## Useful for scenarios with…
+
+- **Complex questions** that span multiple topics or require information from many documents and modalities.
+- **High-stakes applications** where answer completeness and accuracy matter (legal, medical, financial, real-estate, etc.).
+- **Large heterogeneous corpora** where a single search query can't surface all relevant information.
+- **Enterprise knowledge bases** with structured and unstructured data across multiple collections.
+
+## How it works
+
+Agentic Retrieval has two stages:
 
 1. **Ingestion (`cosmos_db_upload.py`)**
-   - Reads JSON documents from one or more configured source folders.
-   - Builds embeddings and stores them in field `e`.
-   - Upserts documents into Cosmos DB containers with vector + full-text indexing support.
+   - Reads documents from one or more configured sources (JSONL by default; custom parsers for other formats such as XML).
+   - Builds embeddings with the configured Azure OpenAI / Foundry endpoint and stores them in the per-source embedding field (e.g. `e`).
+   - Upserts documents into Azure Cosmos DB containers with vector and full-text indexing enabled.
 
-2. **Retrieval + Answering (`dynamic_retriever.py`)**
-   - Single entry point exposing two paradigms via `--mode`:
-     - `--mode tool-use` (default) — agentic LLM-driven tool-calling loop
-       (`initial_search` / `search` / `prune` / `find_information_gaps` / `final_answer`).
-     - `--mode decomposed` — multi-round decomposed RAG using fulltext +
-       vector + diversity selection + semantic reranking.
-   - Generates answers for question files and writes outputs under the configured
-     `paths.output_root`.
+2. **Retrieval and answering (`dynamic_retriever.py`)**
+   - Runs a decomposed RAG loop combining vector search, full-text search, diversity selection, and optional semantic reranking across all configured sources.
+   - Iteratively generates sub-questions to fill knowledge gaps, retrieves targeted evidence for each, and synthesizes a final answer.
+   - Writes per-question traces and grouped answer files under `out/`.
 
 ## What this project does
 
@@ -193,10 +204,11 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 ## Repository layout
 
 - `cosmos_db_upload.py` — ingestion + embedding + Cosmos upsert
-- `dynamic_retriever.py` — unified retriever (tool-use + decomposed paradigms via `--mode`)
+- `agentic_retriever.py` — decomposed RAG retrieval/answer pipeline
 - `timing_summary.py` — timed rerun + timing comparison table generation
-- `config.yaml.example` — full config template
+- `config.yaml.example` — sample data config template for files under `data/`
 - `data/` — sample input corpus
+- `docs/` — concepts and detailed usage docs for the root/sample-data pipeline
 - `out/` — generated outputs
 
 ## Troubleshooting

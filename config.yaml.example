@@ -48,16 +48,16 @@ execution:
 
 # Azure OpenAI / LLM settings ([shared]).
 llm:
-  llm_endpoint: ""
-  api_version: ""
-  llm_model: ""
+ llm_endpoint: "https://<foundry-resource-name>.cognitiveservices.azure.com/"
+  api_version: "2024-12-01-preview"
+  llm_model: "<deployment-name>"
   temperature: 0.0
   max_completion_tokens: 2048
   max_retries: 2
   premium_max_concurrency: 8
   prompt_cache_size: 4096
   use_rbac_auth: true
-  token_scope: ""
+  token_scope: "https://cognitiveservices.azure.com/.default"
   llm_api_key: ""
   context_limit: 270000     # [tool-use only] explicit context window hint
 
@@ -84,14 +84,15 @@ local_llm:
 
 # Embedding settings ([shared])
 embedding:
-  embed_endpoint: ""
-  api_version: ""
-  embed_model: ""
+  embed_endpoint: "https://<foundry-resource-name.openai.azure.com/"
+  api_version: "2024-12-01-preview"
+  embed_model: "<deployment-name>"
   embed_dimensions: 1024
   embed_cache_size: 4096
-  use_rbac_auth: false
-  token_scope: ""
+  use_rbac_auth: true
+  token_scope: "https://ai.azure.com/.default"
   embed_api_key: ""
+
 
 # Semantic ranker ([shared] for use_ranker/region/account_name/tenant_id/token_scope/batch_size/max_retries)
 # - rerank_multiplier : [tool-use only] proportional reranking
