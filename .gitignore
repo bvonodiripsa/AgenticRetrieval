@@ -246,6 +246,7 @@ Thumbs.db
 
 # Project-specific secrets and outputs
 config.yaml
+**/config.pubmed.yaml
 out/
 out/*.*
 data/skf_full.json
@@ -260,3 +261,5 @@ data/food/
 
 utils/create_inference_service.my.py
 utils/test_semantic_reranker.my.py
+
+Standard/
