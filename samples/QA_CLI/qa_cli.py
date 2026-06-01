@@ -110,14 +110,14 @@ def _select_strategy() -> str:
     body = Text()
     body.append("How should QA_CLI answer your questions?\n\n", style="bold")
     body.append("  1) ", style="bold cyan")
-    body.append("🤖 Tool-use", style="bold")
-    body.append("          — agentic function-calling loop\n", style="dim")
+    body.append("🤖 Agentic Retrieval (tool-use)", style="bold")
+    body.append("    — LLM-driven function-calling loop that decides what to search\n", style="dim")
     body.append("  2) ", style="bold cyan")
-    body.append("🧩 Agentic Retrieval", style="bold")
-    body.append(" — decomposed multi-round RAG\n", style="dim")
+    body.append("🧩 Agentic Retrieval (decomposed)", style="bold")
+    body.append(" — splits the question into sub-questions over multiple rounds\n", style="dim")
     body.append("  3) ", style="bold cyan")
     body.append("🔎 Vector search", style="bold")
-    body.append("     — single-shot Cosmos DB KNN baseline\n", style="dim")
+    body.append("     — single-shot vector search\n", style="dim")
     body.append("  4) ", style="bold cyan")
     body.append("⚖️  Compare", style="bold")
     body.append("          — run all three, side by side", style="dim")
@@ -136,8 +136,8 @@ def _select_strategy() -> str:
 
 def _strategy_label(strategy: str) -> str:
     return {
-        "tool-use": "🤖 Tool-use",
-        "decomposed": "🧩 Agentic Retrieval",
+        "tool-use": "🤖 Agentic Retrieval (tool-use)",
+        "decomposed": "🧩 Agentic Retrieval (decomposed)",
         "vector": "🔎 Vector search",
         "compare": "⚖️  Compare",
     }[strategy]
@@ -503,8 +503,8 @@ class CompareAnswerer:
 
     # (title, border_style) for each side-by-side panel.
     _PANELS = (
-        ("🤖 Tool-use", "blue"),
-        ("🧩 Agentic Retrieval", "cyan"),
+        ("🤖 Agentic Retrieval (tool-use)", "blue"),
+        ("🧩 Agentic Retrieval (decomposed)", "cyan"),
         ("🔎 Vector search", "magenta"),
     )
 
