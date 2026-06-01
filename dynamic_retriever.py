@@ -40,6 +40,11 @@ import openai
 import openai as oai  # alias used by tool-use code paths
 import tiktoken
 from azure.cosmos.aio import CosmosClient
+from azure.core.exceptions import ServiceRequestError as AzureServiceRequestError
+
+
+class ServiceConnectionError(Exception):
+    """Raised when a required backend service cannot be reached."""
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential, AzureCliCredential, get_bearer_token_provider
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv
@@ -743,7 +748,7 @@ class LLMClient:
         if _TIMING:
             _log_line(
                 _timing_text_with_question_prefix(
-                    "  ¤ "
+                    "  "
                     f"{label} token budget: prompt_est={estimated_prompt_tokens}, "
                     f"completion={max_completion_tokens}, "
                     f"context_hint={self._max_context_tokens_hint}, "
@@ -1464,9 +1469,23 @@ _SAFE_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*
 
 async def tool_use_embed(text: str) -> list[float]:
     t = _ck("embed query – start")
-    r = await _tool_use_embed_client.embeddings.create(
-        input=[text], model=_tool_use_embed_cfg["embed_model"]
-    )
+    try:
+        r = await _tool_use_embed_client.embeddings.create(
+            input=[text], model=_tool_use_embed_cfg["embed_model"]
+        )
+    except oai.APIConnectionError as e:
+        endpoint = _tool_use_embed_cfg.get("embed_endpoint", "<unknown>")
+        raise ServiceConnectionError(
+            f"Cannot connect to embedding endpoint '{endpoint}'. "
+            f"Check that the service is running and the URL is correct."
+        ) from e
+    except oai.NotFoundError as e:
+        endpoint = _tool_use_embed_cfg.get("embed_endpoint", "<unknown>")
+        model = _tool_use_embed_cfg.get("embed_model", "<unknown>")
+        raise ServiceConnectionError(
+            f"Embedding endpoint returned 404. "
+            f"Check the endpoint URL '{endpoint}' and model name '{model}' in your config."
+        ) from e
     _ck("embed query – done", t)
     dim = _tool_use_embed_cfg.get("embed_dimensions", 1536)
     raw = [float(x) for x in r.data[0].embedding]
@@ -1483,13 +1502,20 @@ async def tool_use_vec_search(container, emb, top_k, ef):
         f"ORDER BY VectorDistance(c.{ef}, @emb)"
     )
     t = _ck(f"vector query (top {top_k}, {container.id}) – start")
-    results = [
-        item.get("c", item)
-        async for item in container.query_items(
-            query=sql,
-            parameters=[{"name": "@k", "value": top_k}, {"name": "@emb", "value": emb}],
-        )
-    ]
+    try:
+        results = [
+            item.get("c", item)
+            async for item in container.query_items(
+                query=sql,
+                parameters=[{"name": "@k", "value": top_k}, {"name": "@emb", "value": emb}],
+            )
+        ]
+    except AzureServiceRequestError as e:
+        uri = _tool_use_cosmos_cfg.get("uri", "<unknown>")
+        raise ServiceConnectionError(
+            f"Cannot connect to Cosmos DB at '{uri}'. "
+            f"Check the URI and that the service is reachable."
+        ) from e
     _ck(f"vector query – done ({len(results)} results, {container.id})", t)
     return results
 
@@ -1503,10 +1529,16 @@ async def tool_use_rerank(query: str, docs: list[str], top_k: int) -> list[str]:
         print("  [rerank] Reranker disabled or no docs to rerank, returning unranked results")
         return docs[-top_k:]
     t = _ck(f"semantic ranker (top {top_k}, {len(docs)} docs) – start")
-    indices = await rerank_documents(
-        _tool_use_r_http, _tool_use_r_url, _tool_use_r_tok,
-        query, docs, top_k, _tool_use_r_bs, _tool_use_r_mr,
-    )
+    try:
+        indices = await rerank_documents(
+            _tool_use_r_http, _tool_use_r_url, _tool_use_r_tok,
+            query, docs, top_k, _tool_use_r_bs, _tool_use_r_mr,
+        )
+    except httpx.ConnectError as e:
+        raise ServiceConnectionError(
+            f"Cannot connect to semantic ranker at '{_tool_use_r_url}'. "
+            f"Check the ranker URL and that the service is reachable."
+        ) from e
     if indices is None:
         _ck("semantic ranker – failed", t)
         print("  [rerank] Reranker failed, returning unranked results")
@@ -1534,6 +1566,12 @@ async def tool_use_hyde_passage(query: str) -> str:
             )
             _ck("LLM HyDE – done", t)
             return r.choices[0].message.content or query
+        except oai.APIConnectionError as e:
+            endpoint = _tool_use_llm_cfg.get("llm_endpoint", "<unknown>")
+            raise ServiceConnectionError(
+                f"Cannot connect to LLM endpoint '{endpoint}'. "
+                f"Check that the service is running and the URL is correct."
+            ) from e
         except (oai.BadRequestError, oai.RateLimitError, oai.APIStatusError) as e:
             print(f"  [HyDE] LLM error ({attempt}/{_tool_use_max_retries}): {e}")
             if attempt >= _tool_use_max_retries:
@@ -1672,6 +1710,12 @@ async def _process_question_inner(q_obj, containers, query, qid, t0, t_run):
             )
             _ck(f"LLM agent step – done (iter {iteration})", t_step)
             retries = 0
+        except oai.APIConnectionError as e:
+            endpoint = _tool_use_llm_cfg.get("llm_endpoint", "<unknown>")
+            raise ServiceConnectionError(
+                f"Cannot connect to LLM endpoint '{endpoint}'. "
+                f"Check that the service is running and the URL is correct."
+            ) from e
         except (oai.BadRequestError, oai.RateLimitError, oai.APIStatusError) as e:
             retries += 1
             print(f"  LLM error ({retries}/{_tool_use_max_retries}): {e}")
@@ -2071,7 +2115,7 @@ async def _run_tool_use_main(config_path: Path) -> None:
     _TIMING = args.timing
     _t0 = time.perf_counter()
     if _TIMING:
-        _log_line("¤ enabled: checkpoints printed as +<step_elapsed>s (total <from_start>s)", kind="timing")
+        _log_line("Enabled: checkpoints printed as +<step_elapsed>s (total <from_start>s)", kind="timing")
 
     await run_tool_use_mode(args)
 
@@ -2136,7 +2180,7 @@ async def _run_decomposed_main(config_path: Path) -> None:
         kind="info"
     )
     if _TIMING:
-        _log_line("¤ enabled: checkpoints printed as +<step_elapsed>s (total <from_start>s)", kind="timing")
+        _log_line("Enabled: checkpoints printed as +<step_elapsed>s (total <from_start>s)", kind="timing")
 
     t = _ck("retriever.initialize – start")
     await retriever.initialize()
@@ -2277,7 +2321,13 @@ if __name__ == "__main__":
             try:
                 sys.stdout = _TeeStream(original_stdout, log_file)
                 sys.stderr = _TeeStream(original_stderr, log_file)
-                asyncio.run(main_async())
+                try:
+                    asyncio.run(main_async())
+                except ServiceConnectionError as e:
+                    sys.stdout = original_stdout
+                    sys.stderr = original_stderr
+                    print(f"\n\033[31mERROR: {e}\033[0m", file=sys.stderr)
+                    sys.exit(1)
             finally:
                 try:
                     sys.stdout.flush()
@@ -2287,7 +2337,11 @@ if __name__ == "__main__":
                     sys.stderr = original_stderr
 
         shutil.copyfile(run_log_path, latest_log_path)
-        _log_line(f"¤ wrote log: {run_log_path}", kind="timing")
-        _log_line(f"¤ updated latest: {latest_log_path}", kind="timing")
+        _log_line(f"wrote log: {run_log_path}", kind="timing")
+        _log_line(f"updated latest: {latest_log_path}", kind="timing")
     else:
-        asyncio.run(main_async())
+        try:
+            asyncio.run(main_async())
+        except ServiceConnectionError as e:
+            print(f"\n\033[31mERROR: {e}\033[0m", file=sys.stderr)
+            sys.exit(1)
