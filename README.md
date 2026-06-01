@@ -27,6 +27,12 @@ Agentic Retrieval has two stages:
    - Iteratively generates sub-questions to fill knowledge gaps, retrieves targeted evidence for each, and synthesizes a final answer.
    - Writes per-question traces and grouped answer files under `out/`.
 
+> **Note:** This package can optionally use the **Azure Cosmos DB Semantic Reranker**
+> to reorder retrieved results by semantic relevance before answer synthesis. It is
+> enabled via the `ranker` settings in `config.yaml` (set `ranker.use_ranker: true`)
+> and can be left disabled if you don't have a reranker resource. Learn more:
+> <https://aka.ms/build26/cosmosreranker>.
+
 ## What this project does
 
 - Uploads your corpus to Cosmos DB through **configurable sources** (`cosmos.sources`), each mapping to a container.
@@ -175,15 +181,17 @@ Outputs are written to:
 
 ## Useful runtime overrides
 
-- `--k-diverse`
-- `--eta`
-- `--rescale-power`
-- `--max-sub-questions`
-- `--rounds`
-- `--max-questions`
-- `--max-workers`
-- `--questions-path`
-- `--output-root`
+These flags override the corresponding `config.yaml` values for a single run (decomposed mode unless noted):
+
+- `--k-diverse` — number of diverse chunks to select via log-determinant (MMR-style) selection; `0` disables diversity selection.
+- `--eta` — Gram-matrix regularization strength used by the diversity selection.
+- `--rescale-power` — exponent applied to query-similarity scores when rescaling before diversity selection.
+- `--max-sub-questions` — maximum number of gap-filling sub-questions generated per round.
+- `--rounds` — number of decompose/retrieve/synthesize rounds to run.
+- `--max-questions` — only answer the first N questions from the questions file (handy for smoke tests).
+- `--max-workers` — number of questions processed concurrently.
+- `--questions-path` — path to the questions `.json` file (overrides `paths.questions_path`).
+- `--output-root` — directory where traces and answer files are written (overrides `paths.output_root`).
 
 ### `--timing` — wall-clock profiling
 
@@ -209,7 +217,14 @@ Immediately before each Cosmos DB call, the actual query is also printed as a `[
 - `config.yaml.example` — sample data config template for files under `data/`
 - `data/` — sample input corpus
 - `docs/` — concepts and detailed usage docs for the root/sample-data pipeline
+- `samples/` — standalone example apps built on the pipeline (see below)
 - `out/` — generated outputs
+
+## Samples
+
+The `samples/` folder contains standalone apps that build on the retrieval pipeline:
+
+- [`samples/QA_CLI`](samples/QA_CLI/) — an interactive terminal app to ask a question and compare retrieval strategies: **tool-use** (agentic function-calling loop), **decomposed** (Agentic Retrieval multi-round RAG), a single-shot **vector** search baseline, or **compare** to run all three side by side. See its [README](samples/QA_CLI/README.md) for setup and usage.
 
 ## Troubleshooting
 
