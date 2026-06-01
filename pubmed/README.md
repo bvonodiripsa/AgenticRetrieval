@@ -10,6 +10,10 @@ This pipeline uses the **PMC Open Access Commercial subset** — a collection of
 full-text biomedical articles from [PubMed Central](https://www.ncbi.nlm.nih.gov/pmc/)
 that are available for commercial reuse under permissive licenses.
 
+> **Scale warning:** The full dataset is **over 150 GB** in size and contains
+> **over 520,000 documents**. Make sure you have enough disk space for the
+> downloaded/extracted XML, and budget accordingly for ingestion time.
+
 | Resource | Link |
 |---|---|
 | PMC OA Subset overview | <https://www.ncbi.nlm.nih.gov/pmc/tools/openftlist/> |
@@ -39,6 +43,12 @@ You also need:
 - An **Azure Cosmos DB** account (NoSQL API) with vector search enabled
 - An **Azure OpenAI** embedding deployment (e.g. `text-embedding-3-small`)
 - Credentials configured in `pubmed/scripts/config.pubmed.yaml`
+
+> **Embedding throughput matters:** With 520,000+ documents, ingestion is
+> bottlenecked by how fast your embedding model can return vectors. Provision an
+> embedding deployment with **enough throughput (high TPM/quota)** for fast
+> ingest — otherwise the process will be slow. Increase your deployment's rate
+> limit (and the ingestion worker concurrency) before running a full-scale load.
 
 ## 1. Download XML articles
 

@@ -53,16 +53,16 @@ paths:
 # Azure OpenAI / LLM settings
 # ---------------------------------------------------------------------------
 llm:
-  llm_endpoint: ""
-  api_version: "2024-05-01-preview"
-  llm_model: "gpt-5.4-mini"
+  llm_endpoint: "https://jacodel-foundry.cognitiveservices.azure.com/"
+  api_version: "2024-12-01-preview"
+  llm_model: "gpt-5.4-nano"
   temperature: 0.0
   max_completion_tokens: 4096
   max_retries: 2
   premium_max_concurrency: 4
   prompt_cache_size: 2048
   use_rbac_auth: true
-  token_scope: ""
+  token_scope: "https://cognitiveservices.azure.com/.default"
   llm_api_key: ""
 
 # ---------------------------------------------------------------------------
@@ -71,16 +71,16 @@ llm:
 local_llm:
   local_fallback_endpoint: "http://localhost:11434/api/generate"
   local_fallback_model: ""
-  use_local_fallback_for_subtasks: true
+  use_local_fallback_for_subtasks: false
   local_max_concurrency: 8
 
 # ---------------------------------------------------------------------------
 # Embedding settings (Azure OpenAI)
 # ---------------------------------------------------------------------------
 embedding:
-  embed_endpoint: ""
-  api_version: "2024-05-01-preview"
-  embed_model: "text-embedding-3-small"
+  embed_endpoint: "https://jacodel-foundry.openai.azure.com/"
+  api_version: "2024-12-01-preview"
+  embed_model: "text-embedding-3-large"
   embed_dimensions: 1536
   embed_cache_size: 4096
   use_rbac_auth: true
@@ -88,14 +88,32 @@ embedding:
   token_scope: "https://cognitiveservices.azure.com/.default"
 
 # ---------------------------------------------------------------------------
+# Azure Cosmos DB Semantic Rerankersettings
+# ---------------------------------------------------------------------------
+
+  # Semantic ranker ([shared] for use_ranker/region/account_name/tenant_id/token_scope/batch_size/max_retries)
+# - rerank_multiplier : [tool-use only] proportional reranking
+# - k_ranker          : [decomposed only] absolute reranking (after diversity selection)
+ranker:
+  use_ranker: false
+  rerank_multiplier: 8      # [tool-use only]
+  k_ranker: 20              # [decomposed only]
+  region: "westus3"
+  account_name: "vector-search-prod"
+  tenant_id: "72f988bf-86f1-41af-91ab-2d7cd011db47"
+  token_scope: "https://dbinference.azure.com/.default"
+  batch_size: 16
+  max_retries: 5
+
+# ---------------------------------------------------------------------------
 # Cosmos DB settings
 # ---------------------------------------------------------------------------
 cosmos:
   # Upload settings used by cosmos_db_upload.py
-  cosmos_account_name: ""
-  cosmos_resource_group: ""
-  azure_subscription_id: ""
-  uri: ""
+  cosmos_account_name: "cosmos-tests"
+  cosmos_resource_group: "jacodel-test"
+  azure_subscription_id: "220fc532-6091-423c-8ba0-66c2397d591b"
+  uri: "https://cosmos-tests.documents.azure.com:443/"
   key: ""                                   # leave empty when using RBAC
   database_name: "pubmed"
   use_rbac_auth: true
