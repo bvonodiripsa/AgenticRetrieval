@@ -10,8 +10,7 @@ def get_access_token():
 
 headers = {
     "Authorization": f"Bearer {get_access_token().token}",
-    "Content-Type": "application/json",
-    "X-Environment": "Staging" # This is to target the staging slot
+    "Content-Type": "application/json"
 }
 
 body = {
