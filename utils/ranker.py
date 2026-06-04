@@ -47,10 +47,7 @@ async def rerank_documents(
     }
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        # Required to target the staging slot of the semantic-ranker preview.
-        # Without it the server silently returns Scores=[] with token_usage=0.
-        "X-Environment": "Staging",
+        "Content-Type": "application/json"
     }
 
     transient_empty = 0
