@@ -63,7 +63,7 @@ Or use setup helpers:
 
 ### 1) Populate `config.yaml`
 
-Start from `config.yaml.example` and fill required values in `config.yaml`.
+Start from `config.yaml.example` and fill required values in `config.yaml`. Make sure to use the latest `config.yaml.example` as the format might have been updated.
 
 At minimum, set:
 
