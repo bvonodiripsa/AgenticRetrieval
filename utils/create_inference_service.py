@@ -6,8 +6,7 @@ access_token = credentials.get_token("https://management.azure.com/.default")
 
 headers = {
     "Authorization": f"Bearer {access_token.token}",
-    "Content-Type": "application/json",
-    "X-Environment": "staging" # This is to target the staging slot
+    "Content-Type": "application/json"
 }
 
 # NOTE: Update these variables with your account details
