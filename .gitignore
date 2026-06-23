@@ -264,3 +264,8 @@ utils/create_inference_service.my.py
 utils/test_semantic_reranker.my.py
 
 Standard/
+# Local test outputs and temp files
+out_solar/
+upload_log.txt
+data/OneDrive_1_6-16-2026.zip
+data/new/

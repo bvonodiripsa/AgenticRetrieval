@@ -659,6 +659,21 @@ def create_database_and_container_via_management(credential, source_specs: List[
                 if "Conflict" in error_str or "already exists" in error_str.lower():
                     print(f"  ✓ Container '{container_name}' already exists - using as-is (no settings update)")
                     break
+                if "serverless" in error_str.lower() or "not supported for serverless" in error_str.lower():
+                    print(f"  ℹ Serverless account detected — retrying without throughput settings...")
+                    container_params_no_tp = SqlContainerCreateUpdateParameters(
+                        resource=container_resource, options=CreateUpdateOptions()
+                    )
+                    poller = mgmt_client.sql_resources.begin_create_update_sql_container(
+                        resource_group_name=resource_group,
+                        account_name=account_name,
+                        database_name=DATABASE_NAME,
+                        container_name=container_name,
+                        create_update_sql_container_parameters=container_params_no_tp
+                    )
+                    poller.result()
+                    print(f"  ✓ Container '{container_name}' created (serverless, no throughput)")
+                    break
                 if "capability has not been enabled" in error_str.lower() and attempt < max_retries - 1:
                     print(f"  ⏳ Waiting for capabilities to propagate (attempt {attempt + 1}/{max_retries})...")
                     time.sleep(retry_delay)
@@ -809,7 +824,7 @@ def _load_jsonl_documents(jsonl_path: str) -> list[dict[str, Any]]:
     return documents
 
 
-async def upload_document(container, doc: Dict[str, Any], max_retries: int = 5) -> bool:
+async def upload_document(container, doc: Dict[str, Any], max_retries: int = 10) -> bool:
     """Upload a single document to Cosmos DB with retry + backoff for 429s and transient errors."""
     doc_id = doc.get("id", "unknown")
     for attempt in range(max_retries):
@@ -819,7 +834,7 @@ async def upload_document(container, doc: Dict[str, Any], max_retries: int = 5) 
         except exceptions.CosmosHttpResponseError as e:
             if e.status_code == 429 and attempt < max_retries - 1:
                 retry_after = float(e.headers.get("x-ms-retry-after-ms", 0)) / 1000.0
-                wait = max(retry_after, 0.5 * (2 ** attempt))
+                wait = max(retry_after, 1.0 * (2 ** attempt))
                 await asyncio.sleep(wait)
                 continue
             print(f"Error uploading document {doc_id}: {e}")
