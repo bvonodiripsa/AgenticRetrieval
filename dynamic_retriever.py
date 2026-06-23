@@ -48,11 +48,54 @@ class ServiceConnectionError(Exception):
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential, AzureCliCredential, get_bearer_token_provider
 from azure.identity.aio import AzureCliCredential as AsyncAzureCliCredential
 from dotenv import load_dotenv
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from tqdm import tqdm
 import numpy as np
 
 from greedy_log_det import greedy_log_det_select
+
+# In-process embedding support (Qwen3-Embedding-0.6B)
+_embed_in_process_model = None
+_embed_in_process_tokenizer = None
+_embed_in_process_lock = None
+
+def _get_in_process_embed():
+    """Lazy-load Qwen3-Embedding-0.6B for in-process embedding."""
+    global _embed_in_process_model, _embed_in_process_tokenizer, _embed_in_process_lock
+    import threading
+    if _embed_in_process_lock is None:
+        _embed_in_process_lock = threading.Lock()
+    if _embed_in_process_model is not None:
+        return _embed_in_process_model, _embed_in_process_tokenizer
+    with _embed_in_process_lock:
+        if _embed_in_process_model is not None:
+            return _embed_in_process_model, _embed_in_process_tokenizer
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+        model_id = "Qwen/Qwen3-Embedding-0.6B"
+        _embed_in_process_tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        _embed_in_process_model = AutoModel.from_pretrained(model_id, trust_remote_code=True, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+        # Use CPU for embedding (vLLM uses both GPUs); 0.6B model is fast on CPU for single queries
+        pass
+        _embed_in_process_model.eval()
+        return _embed_in_process_model, _embed_in_process_tokenizer
+
+def _embed_in_process_sync(text: str, embed_dim: int = 1024) -> list:
+    """Embed text in-process using mean pooling + L2 normalize."""
+    import torch
+    model, tokenizer = _get_in_process_embed()
+    device = next(model.parameters()).device
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        outputs = model(**inputs)
+        attention_mask = inputs["attention_mask"].unsqueeze(-1).float()
+        token_embs = outputs.last_hidden_state.float() * attention_mask
+        emb = token_embs.sum(dim=1) / attention_mask.sum(dim=1).clamp(min=1e-9)
+        emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+    vec = emb[0].cpu().tolist()
+    return vec[:embed_dim]
+
 from utils.fulltext import fulltext_search
 from utils.ranker import rerank_documents
 
@@ -465,19 +508,28 @@ class LLMClient:
         return values
     
     @property
-    def llm_client(self) -> AsyncAzureOpenAI:
+    def llm_client(self):
         if not self._llm_client:
-            client_kwargs = {
-                "api_version": self._cfg["api_version"],
-                "azure_endpoint": self._cfg["llm_endpoint"],
-            }
-            if self._use_rbac_auth:
-                client_kwargs["azure_ad_token_provider"] = self._token_provider
+            endpoint = self._cfg["llm_endpoint"]
+            if endpoint.startswith("http://localhost") or endpoint.startswith("http://127.0.0.1"):
+                self._llm_client = AsyncOpenAI(
+                    base_url=endpoint,
+                    api_key=self._llm_api_key or "dummy",
+                    timeout=600.0,
+                    max_retries=0,
+                )
             else:
-                if not self._llm_api_key:
-                    raise ValueError("llm.llm_api_key (or llm.azure_openai_key) must be set when llm.use_rbac_auth is false")
-                client_kwargs["api_key"] = self._llm_api_key
-            self._llm_client = AsyncAzureOpenAI(**client_kwargs)
+                client_kwargs = {
+                    "api_version": self._cfg["api_version"],
+                    "azure_endpoint": endpoint,
+                }
+                if self._use_rbac_auth:
+                    client_kwargs["azure_ad_token_provider"] = self._token_provider
+                else:
+                    if not self._llm_api_key:
+                        raise ValueError("llm.llm_api_key (or llm.azure_openai_key) must be set when llm.use_rbac_auth is false")
+                    client_kwargs["api_key"] = self._llm_api_key
+                self._llm_client = AsyncAzureOpenAI(**client_kwargs)
         return self._llm_client
     
     @property
@@ -932,6 +984,13 @@ class LLMClient:
         cached = self._embed_cache.get(text)
         if isinstance(cached, list):
             return list(cached)
+        # In-process embedding (no Ollama needed)
+        use_in_process = bool(self._embed_cfg.get("use_embed_in_process", False))
+        if use_in_process:
+            emb = await asyncio.to_thread(_embed_in_process_sync, text, self._embed_dimensions)
+            normalized = self._normalize_embedding(emb)
+            self._embed_cache.set(text, normalized)
+            return list(normalized)
         embed_endpoint = str(self._embed_cfg.get("embed_endpoint", "")).strip()
         if embed_endpoint.endswith("/api/embeddings"):
             try:
